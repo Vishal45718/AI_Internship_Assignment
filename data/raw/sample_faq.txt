@@ -1,0 +1,96 @@
+TechCorp FAQ — Frequently Asked Questions
+Version 3.1 | Updated February 2024
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ACCOUNT & BILLING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Q: How do I reset my password?
+A: To reset your password, visit techcorp.com/login and click "Forgot Password?".
+   Enter the email address registered to your account. You will receive a reset link
+   within 5 minutes. The link expires after 24 hours. If you don't see the email,
+   check your spam folder. If the issue persists, contact support@techcorp.com.
+
+Q: How many devices can I install TechCorp on with a single license?
+A: Standard licenses allow installation on up to 3 devices simultaneously.
+   Business licenses allow up to 25 devices. Enterprise plans offer unlimited devices.
+   To deactivate a device and free a license slot, go to Account Settings > My Devices.
+
+Q: Can I transfer my license to a new computer?
+A: Yes. Deactivate the license on your old computer via Account Settings > My Devices,
+   then activate it on your new computer using the same product key.
+
+Q: What payment methods are accepted?
+A: TechCorp accepts Visa, Mastercard, American Express, PayPal, bank transfer (for orders
+   over $500), and cryptocurrency (Bitcoin and Ethereum) on select plans.
+
+Q: How do I cancel my subscription?
+A: Log in to your account and navigate to Account Settings > Subscription > Cancel Plan.
+   Cancellations take effect at the end of the current billing period. You will retain
+   access to all features until the subscription end date.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PRODUCTS & FEATURES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Q: What is the difference between TechCorp Pro and TechCorp Enterprise?
+A: TechCorp Pro includes all core features, 100 GB cloud storage, and email support.
+   TechCorp Enterprise adds unlimited cloud storage, priority phone support, custom
+   integrations via API, SSO (Single Sign-On) support, and dedicated account management.
+   Enterprise pricing starts at $499/month for up to 50 users.
+
+Q: Does TechCorp work offline?
+A: Yes. Core functions work offline. Cloud sync, collaboration features, and AI-powered
+   tools require an internet connection. Changes made offline sync automatically when
+   you reconnect to the internet.
+
+Q: What file formats does TechCorp support?
+A: TechCorp imports and exports: PDF, DOCX, XLSX, CSV, JSON, XML, PNG, JPEG, TIFF,
+   and SVG. Native project files use the .tcp format. Third-party integrations support
+   additional formats through our API.
+
+Q: Is there a mobile app?
+A: Yes. TechCorp Mobile is available for iOS (iOS 14 or later) and Android (Android 9 or later).
+   The mobile app supports viewing and light editing. Full feature parity with desktop is
+   planned for Q3 2024.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECURITY & PRIVACY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Q: How is my data protected?
+A: All data is encrypted at rest using AES-256 encryption and in transit using TLS 1.3.
+   TechCorp is SOC 2 Type II certified and GDPR compliant. Our servers are hosted in
+   AWS data centers in the US and EU with 99.9% uptime SLA.
+
+Q: Can TechCorp staff access my files?
+A: No. TechCorp uses zero-knowledge encryption for personal files. Our staff cannot
+   access your file contents. Support staff can only see account metadata (email,
+   subscription status) necessary to resolve support tickets.
+
+Q: How do I enable two-factor authentication?
+A: Go to Account Settings > Security > Two-Factor Authentication. We support
+   authenticator apps (Google Authenticator, Authy, 1Password) and hardware keys
+   (YubiKey). SMS-based 2FA is available but not recommended due to SIM-swap risks.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TROUBLESHOOTING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Q: Why is my cloud sync not working?
+A: Common causes: (1) No internet connection, (2) Sync is paused — check the sync icon
+   in the system tray, (3) Storage quota exceeded — upgrade your plan or delete old files,
+   (4) Firewall blocking TechCorp on ports 443 and 8080.
+   Run Help > Run Diagnostics to identify the specific issue.
+
+Q: I accidentally deleted an important file. Can I recover it?
+A: Yes! Deleted files are kept in the Trash for 30 days. Go to the Trash section to
+   restore them. Pro and Enterprise users also have File History, which keeps previous
+   versions of files for up to 90 days. Contact support immediately for deleted files
+   older than 30 days — recovery may still be possible for 14 additional days.
+
+Q: The application is running slowly. What can I do?
+A: Try these steps: (1) Restart the application and your computer, (2) Clear the
+   application cache via Settings > Advanced > Clear Cache, (3) Ensure you have at
+   least 4 GB of free RAM while TechCorp is running, (4) If using a large project
+   (over 10,000 items), enable Performance Mode in Settings > Performance.

@@ -1,0 +1,17 @@
+product_id,name,category,price_usd,warranty_months,weight_kg,stock_status,description
+TC-PRO-001,TechCorp Pro Laptop 15,Laptops,1299.99,24,1.8,in_stock,High-performance laptop with Intel Core i7 and 16GB RAM
+TC-PRO-002,TechCorp Pro Laptop 13,Laptops,999.99,24,1.3,in_stock,Compact laptop with Intel Core i5 and 8GB RAM
+TC-TAB-001,TechCorp Tablet Pro,Tablets,699.99,12,0.6,in_stock,10-inch tablet with stylus support and 12-hour battery life
+TC-TAB-002,TechCorp Tablet Mini,Tablets,399.99,12,0.4,low_stock,8-inch compact tablet ideal for reading and light tasks
+TC-PHN-001,TechCorp Phone X1,Smartphones,849.99,12,0.195,in_stock,6.7-inch AMOLED display 5G smartphone with 50MP camera
+TC-PHN-002,TechCorp Phone S1,Smartphones,549.99,12,0.175,in_stock,6.1-inch compact 5G smartphone with 32MP camera
+TC-ACC-001,TechCorp Wireless Earbuds,Audio,149.99,12,0.05,in_stock,Active noise-cancelling earbuds with 8-hour playback
+TC-ACC-002,TechCorp Over-Ear Headphones,Audio,299.99,24,0.35,in_stock,Studio-quality headphones with spatial audio support
+TC-ACC-003,TechCorp USB-C Hub 7-in-1,Accessories,79.99,12,0.12,in_stock,7-port USB-C hub with HDMI 4K and 100W PD charging
+TC-ACC-004,TechCorp Wireless Charger,Accessories,49.99,12,0.08,in_stock,15W wireless charger compatible with all Qi devices
+TC-ACC-005,TechCorp Laptop Stand,Accessories,69.99,24,0.55,in_stock,Ergonomic aluminum laptop stand adjustable 15-45 degrees
+TC-SFT-001,TechCorp Suite Pro Annual,Software,199.99,0,0.0,in_stock,Annual license for TechCorp Suite Pro (3 devices)
+TC-SFT-002,TechCorp Suite Enterprise Monthly,Software,499.99,0,0.0,in_stock,Monthly Enterprise plan for up to 50 users
+TC-SFT-003,TechCorp Security Pack,Software,99.99,0,0.0,in_stock,Annual cybersecurity suite with VPN and password manager
+TC-SRV-001,TechCorp Cloud Storage 1TB,Cloud Services,9.99,0,0.0,in_stock,1TB cloud storage with file versioning for 90 days
+TC-SRV-002,TechCorp Cloud Storage 5TB,Cloud Services,24.99,0,0.0,in_stock,5TB cloud storage with priority sync and advanced sharing
