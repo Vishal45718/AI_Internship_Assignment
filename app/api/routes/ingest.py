@@ -64,7 +64,7 @@ async def upload_and_ingest(
     failed: list[str] = []
 
     for upload in files:
-        filename = upload.filename or "unknown_file"
+        filename = Path(upload.filename or "unknown_file").name
         target = settings.data_dir / filename
         try:
             content = await upload.read()

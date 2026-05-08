@@ -93,20 +93,6 @@ VALID_INTENTS = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# QUERY EXPANSION — Generates alternative phrasings for better recall.
-# ─────────────────────────────────────────────────────────────────────────────
-QUERY_EXPANSION_PROMPT = """\
-Given the following search query, generate exactly 2 alternative phrasings \
-that preserve the original meaning but use different vocabulary or sentence \
-structure. These will be used to search a document database.
-
-Original query: {query}
-
-Return ONLY the 2 alternative phrasings, one per line. \
-Do not number them. Do not add any explanation.
-"""
-
-# ─────────────────────────────────────────────────────────────────────────────
 # CONTEXT FORMAT — Template for each retrieved chunk injected into the prompt.
 # ─────────────────────────────────────────────────────────────────────────────
 CONTEXT_CHUNK_TEMPLATE = """\

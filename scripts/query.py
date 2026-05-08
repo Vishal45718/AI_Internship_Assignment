@@ -155,11 +155,11 @@ def main() -> int:
                 print("Goodbye!")
                 break
             elif cmd == "/clear":
-                from app.core.dependencies import get_rag_agent
-                # Reset memory for this session
-                agent._memory.delete(session_id)
-                session_id = str(uuid.uuid4())[:8]
-                print(f"✓ Memory cleared. New session: {session_id}")
+                if agent.clear_session(session_id):
+                    session_id = str(uuid.uuid4())[:8]
+                    print(f"✓ Memory cleared. New session: {session_id}")
+                else:
+                    print("⚠️  No active session memory to clear.")
             elif cmd == "/stats":
                 from app.core.dependencies import get_vector_store
                 store = get_vector_store()

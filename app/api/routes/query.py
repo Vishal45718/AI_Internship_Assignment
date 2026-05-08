@@ -53,4 +53,7 @@ async def query_endpoint(
         return response
     except Exception as exc:
         logger.exception("Unhandled error in /query: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error. Please check logs for request details.",
+        )

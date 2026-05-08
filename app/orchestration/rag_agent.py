@@ -31,6 +31,7 @@ from app.models.retrieval import RetrievedChunk
 from app.orchestration.fallback_handler import FallbackHandler
 from app.orchestration.memory import MemoryStore
 from app.orchestration.query_analyzer import QueryAnalyzer
+from app.retrieval.reranker import create_reranker
 from configs.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,8 @@ class RAGAgent:
         self._llm = deps.llm_client
         self._store = deps.vector_store
         self._retriever = deps.retriever
-        self._reranker = deps.reranker
+        self._default_reranker = deps.reranker
+        self._reranker_factory = create_reranker
         self._prompt_builder = PromptBuilder()
         self._validator = ResponseValidator()
         self._fallback = FallbackHandler(vector_store=deps.vector_store)
@@ -136,7 +138,12 @@ class RAGAgent:
         # ── Step 4: Rerank ────────────────────────────────────────────────────
         # Apply the reranker (either cross-encoder or no-op)
         # The reranker also applies the confidence threshold check
-        final_result = self._reranker.rerank(query, retrieval_result)
+        reranker = (
+            self._reranker_factory(enabled=enable_reranking)
+            if enable_reranking is not None
+            else self._default_reranker
+        )
+        final_result = reranker.rerank(query, retrieval_result)
 
         # ── Step 5: Fallback check ────────────────────────────────────────────
         if not final_result.passed_threshold:
@@ -221,6 +228,10 @@ class RAGAgent:
             retrieval_strategy=final_result.retrieval_strategy,
             latency_ms=latency,
         )
+
+    def clear_session(self, session_id: str) -> bool:
+        """Clear the conversation memory for a session."""
+        return self._memory.delete(session_id)
 
     @staticmethod
     def _elapsed_ms(start: float) -> float:

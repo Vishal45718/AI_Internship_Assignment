@@ -70,7 +70,6 @@ class Settings(BaseSettings):
     similarity_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
     confidence_threshold: float = Field(default=0.40, ge=0.0, le=1.0)
     enable_reranking: bool = Field(default=True)
-    enable_query_expansion: bool = Field(default=False)
 
     # ── Chunking ─────────────────────────────────────────────────────────────
     chunk_size: int = Field(default=1500, ge=256, le=8192)

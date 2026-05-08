@@ -29,7 +29,6 @@ class IngestRequest(BaseModel):
     """Request body for POST /ingest (URL-based ingestion)."""
 
     file_paths: list[str] = Field(..., min_length=1, description="List of absolute file paths to ingest.")
-    collection_name: str | None = Field(default=None, description="Override default collection.")
 
 
 class DeleteRequest(BaseModel):
