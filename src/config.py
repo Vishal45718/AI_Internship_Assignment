@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     )
 
     # ── LLM Provider ────────────────────────────────────────────────────────
-    llm_provider: Literal["openai", "gemini", "ollama"] = Field(
+    llm_provider: Literal["openai", "gemini", "ollama", "openrouter"] = Field(
         default="openai",
         description="LLM backend to use for answer generation.",
     )
@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     # Ollama (local)
     ollama_base_url: str = Field(default="http://localhost:11434")
     ollama_model: str = Field(default="mistral")
+
+    # OpenRouter
+    openrouter_api_key: str = Field(default="", description="OpenRouter API key.")
+    openrouter_model: str = Field(default="google/gemini-flash-1.5")
+    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
 
     # ── Embedding ────────────────────────────────────────────────────────────
     embedding_model: str = Field(
