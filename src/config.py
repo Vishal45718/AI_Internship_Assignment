@@ -52,7 +52,7 @@ class Settings(BaseSettings):
 
     # OpenRouter
     openrouter_api_key: str = Field(default="", description="OpenRouter API key.")
-    openrouter_model: str = Field(default="google/gemini-flash-1.5")
+    openrouter_model: str = Field(default="google/gemini-1.5-flash")
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
 
     # ── Embedding ────────────────────────────────────────────────────────────

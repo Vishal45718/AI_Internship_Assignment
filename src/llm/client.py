@@ -132,33 +132,36 @@ class OpenAIClient(BaseLLMClient):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class GeminiClient(BaseLLMClient):
-    """Google Gemini API client."""
+    """Google Gemini API client (using new google.genai SDK)."""
 
     def __init__(self) -> None:
         try:
-            import google.generativeai as genai
+            from google import genai
             self._genai = genai
         except ImportError:
-            raise RuntimeError("google-generativeai not installed. Run: pip install google-generativeai")
+            raise RuntimeError("google-genai not installed. Run: pip install google-genai")
 
         settings = get_settings()
         if not settings.gemini_api_key:
             raise RuntimeError("GEMINI_API_KEY is not set in .env")
 
-        self._genai.configure(api_key=settings.gemini_api_key)
-        self._model_name = settings.gemini_model
-        self._model = self._genai.GenerativeModel(self._model_name)
+        self._client = self._genai.Client(api_key=settings.gemini_api_key)
+        # Handle cases where model name might still have the old 'models/' prefix
+        self._model_name = settings.gemini_model.replace("models/", "")
         logger.info("Gemini client ready: model=%s", self._model_name)
 
     def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
-        # History mapping omitted for brevity, focusing on single query for Gemini
         combined = f"{system_prompt}\n\nUser question: {user_message}"
         last_error: Exception | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                response = self._model.generate_content(
-                    combined,
-                    generation_config={"temperature": 0.1, "max_output_tokens": 2048},
+                response = self._client.models.generate_content(
+                    model=self._model_name,
+                    contents=combined,
+                    config=self._genai.types.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=2048,
+                    ),
                 )
                 return response.text or ""
             except Exception as exc:
@@ -175,10 +178,13 @@ class GeminiClient(BaseLLMClient):
     def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None):
         combined = f"{system_prompt}\n\nUser question: {user_message}"
         try:
-            response = self._model.generate_content(
-                combined,
-                generation_config={"temperature": 0.1, "max_output_tokens": 2048},
-                stream=True
+            response = self._client.models.generate_content_stream(
+                model=self._model_name,
+                contents=combined,
+                config=self._genai.types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=2048,
+                ),
             )
             for chunk in response:
                 if chunk.text:
