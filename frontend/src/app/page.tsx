@@ -24,6 +24,7 @@ interface Conversation {
 export default function Home() {
   const [mode, setMode] = useState<Mode>("general");
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [availableFiles, setAvailableFiles] = useState<any[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -36,12 +37,25 @@ export default function Home() {
   // Fetch history on load
   useEffect(() => {
     fetchHistory();
+    fetchFiles();
   }, []);
 
   // Scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  const fetchFiles = async () => {
+    try {
+      const res = await fetch(`http://${window.location.hostname}:8000/api/status`);
+      const data = await res.json();
+      if (data && data.documents) {
+        setAvailableFiles(data.documents);
+      }
+    } catch (e) {
+      console.error("Failed to fetch files", e);
+    }
+  };
 
   const fetchHistory = async () => {
     try {
@@ -101,6 +115,7 @@ export default function Home() {
       if (res.ok) {
         setUploadStatus(`Success: ${data.chunks} chunks indexed.`);
         setMode("document");
+        fetchFiles(); // Refresh file list
       } else {
         setUploadStatus(`Error: ${data.detail}`);
       }
@@ -188,15 +203,15 @@ export default function Home() {
   };
 
   return (
-    <div className="flex h-screen bg-gray-900 text-white font-sans overflow-hidden">
+    <div suppressHydrationWarning className="flex h-screen bg-gray-900 text-white font-sans overflow-hidden">
       {/* Sidebar */}
-      <div className={`fixed md:relative z-20 flex-shrink-0 h-full bg-gray-950 border-r border-gray-800 transition-all duration-300 ${isSidebarOpen ? "w-64" : "w-0"} overflow-hidden`}>
+      <div suppressHydrationWarning className={`fixed md:relative z-20 flex-shrink-0 h-full bg-gray-950 border-r border-gray-800 transition-all duration-300 ${isSidebarOpen ? "w-64" : "w-0"} overflow-hidden`}>
         <div className="flex flex-col h-full p-3 w-64">
           <button 
             onClick={createNewChat}
             className="flex items-center gap-3 p-3 w-full rounded-md border border-gray-700 hover:bg-gray-800 transition-colors"
           >
-            <Plus size={18} />
+            <Plus size={18} suppressHydrationWarning />
             <span className="text-sm font-medium">New Chat</span>
           </button>
           
@@ -208,10 +223,22 @@ export default function Home() {
                 onClick={() => loadConversation(conv.id)}
                 className={`flex items-center gap-3 w-full p-3 rounded-md text-sm text-left truncate transition-colors ${activeConvId === conv.id ? "bg-gray-800 text-white" : "text-gray-300 hover:bg-gray-800/50"}`}
               >
-                {conv.mode === "general" ? <MessageSquare size={16} /> : <FileText size={16} />}
+                {conv.mode === "general" ? <MessageSquare size={16} suppressHydrationWarning /> : <FileText size={16} suppressHydrationWarning />}
                 <span className="truncate">{conv.title}</span>
               </button>
             ))}
+
+            {availableFiles.length > 0 && (
+              <div className="mt-8">
+                <h3 className="text-xs text-gray-500 font-semibold mb-3 px-3 uppercase tracking-wider">Available Files</h3>
+                {availableFiles.map((file: any, idx) => (
+                  <div key={idx} className="flex items-center gap-3 w-full p-3 rounded-md text-sm text-left truncate text-gray-400">
+                    <FileText size={16} suppressHydrationWarning />
+                    <span className="truncate" title={file.source_file}>{file.source_file}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -222,7 +249,7 @@ export default function Home() {
         <header className="h-14 border-b border-gray-800 flex items-center justify-between px-4 sticky top-0 bg-gray-900/80 backdrop-blur-md z-10">
           <div className="flex items-center gap-3">
             <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 hover:bg-gray-800 rounded-md text-gray-400 hover:text-white">
-              <Menu size={20} />
+              <Menu size={20} suppressHydrationWarning />
             </button>
             
             {/* Mode Toggle */}
@@ -231,13 +258,13 @@ export default function Home() {
                 onClick={() => setMode("general")}
                 className={`px-3 py-1.5 rounded-md text-sm font-medium flex items-center gap-2 transition-colors ${mode === "general" ? "bg-gray-800 text-white" : "text-gray-400 hover:text-white"}`}
               >
-                <MessageSquare size={16} /> <span className="hidden sm:inline">General AI</span>
+                <MessageSquare size={16} suppressHydrationWarning /> <span className="hidden sm:inline">General AI</span>
               </button>
               <button
                 onClick={() => setMode("document")}
                 className={`px-3 py-1.5 rounded-md text-sm font-medium flex items-center gap-2 transition-colors ${mode === "document" ? "bg-blue-600/20 text-blue-400" : "text-gray-400 hover:text-white"}`}
               >
-                <FileText size={16} /> <span className="hidden sm:inline">Ask Documents</span>
+                <FileText size={16} suppressHydrationWarning /> <span className="hidden sm:inline">Ask Documents</span>
               </button>
             </div>
           </div>
@@ -255,7 +282,7 @@ export default function Home() {
               htmlFor="file-upload" 
               className="flex items-center gap-2 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-md text-sm font-medium cursor-pointer transition-colors"
             >
-              <FileUp size={16} />
+              <FileUp size={16} suppressHydrationWarning />
               <span className="hidden sm:inline">{isUploading ? "Uploading..." : "Upload File"}</span>
             </label>
             {uploadStatus && (
@@ -272,7 +299,7 @@ export default function Home() {
             {messages.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full mt-32 text-center text-gray-400">
                 <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mb-6">
-                  {mode === "general" ? <MessageSquare size={32} /> : <FileText size={32} className="text-blue-400" />}
+                  {mode === "general" ? <MessageSquare size={32} suppressHydrationWarning /> : <FileText size={32} className="text-blue-400" suppressHydrationWarning />}
                 </div>
                 <h2 className="text-2xl font-bold text-white mb-2">
                   {mode === "general" ? "How can I help you today?" : "Ask questions about your documents."}
@@ -304,7 +331,7 @@ export default function Home() {
                         <div className="flex flex-wrap gap-2">
                           {msg.sources.map((src, idx) => (
                             <div key={idx} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 flex items-center gap-2 text-xs text-gray-300 cursor-help" title={src.preview}>
-                              <FileText size={12} className="text-blue-400" />
+                              <FileText size={12} className="text-blue-400" suppressHydrationWarning />
                               <span>{src.file}</span>
                               {src.page && <span className="text-gray-500">pg {src.page}</span>}
                               <span className="text-emerald-500 bg-emerald-500/10 px-1 rounded">
@@ -345,7 +372,7 @@ export default function Home() {
                 disabled={!input.trim() || isStreaming}
                 className="absolute right-2 bottom-2 p-2 rounded-lg bg-gray-700 text-white hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
-                <Send size={18} />
+                <Send size={18} suppressHydrationWarning />
               </button>
             </form>
           </div>
