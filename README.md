@@ -1,185 +1,232 @@
-# Agentic RAG System
+# 📄 RAG System — Document Q&A with Hallucination Prevention
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green?logo=fastapi)](https://fastapi.tiangolo.com)
 [![ChromaDB](https://img.shields.io/badge/VectorDB-ChromaDB-orange)](https://www.trychroma.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## Overview
 
-Agentic RAG is a professional Retrieval-Augmented Generation system built for reliability, transparency, and modularity.
-It indexes documents from common formats, performs semantic retrieval and reranking, and generates grounded answers with inline citations.
-The system is designed to fail safely with deterministic fallback responses rather than hallucinate when the indexed content is insufficient.
+A clean, modular **Retrieval-Augmented Generation (RAG)** system that answers questions strictly from your uploaded documents. The system ingests documents in multiple formats, chunks and embeds them into a local vector database, and uses semantic retrieval + LLM generation to provide grounded, source-cited answers.
+
+**Key principle:** If the answer isn't in the documents, the system says so honestly — no hallucination.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     INGESTION PIPELINE                      │
+│                                                             │
+│  PDF/TXT/CSV/MD → Load → Clean → Chunk → Embed → Store     │
+│                                                             │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                     ChromaDB (local)
+                           │
+┌──────────────────────────┴──────────────────────────────────┐
+│                      QUERY PIPELINE                         │
+│                                                             │
+│  Question → Retrieve → Threshold Check → Prompt → LLM →    │
+│                  ↓                          ↓               │
+│           Below threshold?           Above threshold?       │
+│                  ↓                          ↓               │
+│         "Not found in docs"         Grounded Answer +       │
+│         (no LLM call)               Source Citations        │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Features
 
-- Multi-format ingestion: PDF, TXT, Markdown, and CSV
-- Safe chunking with metadata-rich provenance
-- Configurable embedding backends: OpenAI or local Sentence-Transformers
-- Two-stage retrieval: semantic search + cross-encoder reranking
-- Hallucination prevention via confidence thresholds and grounded prompts
-- Structured fallback responses on low confidence or out-of-scope queries
-- Explicit source citations in every answer
-- Conversation memory support via session IDs
-- FastAPI REST API and optional Streamlit demo UI
-- CLI tools for ingestion, querying, and benchmarking
-- Production-ready logging, configuration, and CI workflow
+- **Multi-format ingestion**: PDF, TXT, Markdown, CSV
+- **Smart chunking**: Paragraph-aware splitting (500 chars, 50 overlap)
+- **Local embeddings**: `sentence-transformers/all-MiniLM-L6-v2` — no API costs
+- **Persistent vector store**: ChromaDB with cosine similarity search
+- **Similarity threshold filtering**: Only uses chunks above confidence threshold
+- **Hallucination prevention**: Three-layer defense system
+- **Source citations**: Every answer references the source document
+- **Multiple LLM providers**: OpenAI, Google Gemini, or Ollama (local)
+- **Simple CLI**: Ingest docs and ask questions from the terminal
+- **Idempotent ingestion**: Re-ingesting updates, doesn't duplicate
 
-## Tech Stack
+## Folder Structure
 
-- Python 3.11
-- FastAPI
-- ChromaDB
-- OpenAI / Google Gemini / Ollama
-- sentence-transformers
-- Streamlit
-- pytest, ruff, mypy
+```
+project/
+│
+├── data/
+│   ├── raw/                  # Place your documents here
+│   └── vectorstore/          # ChromaDB persistence (auto-created)
+│
+├── src/
+│   ├── ingestion/
+│   │   ├── loaders.py        # PDF, TXT, CSV, Markdown loaders
+│   │   └── chunker.py        # Text splitting with metadata
+│   ├── processing/
+│   │   └── text.py           # Text cleaning & normalization
+│   ├── embeddings/
+│   │   └── embedder.py       # Sentence-transformer embeddings
+│   ├── vectordb/
+│   │   └── store.py          # ChromaDB vector store wrapper
+│   ├── retrieval/
+│   │   └── retriever.py      # Semantic search + threshold filter
+│   ├── llm/
+│   │   ├── client.py         # LLM provider abstraction
+│   │   └── prompts.py        # Prompt templates
+│   ├── utils/
+│   │   ├── hashing.py        # Content hashing for dedup
+│   │   └── logging.py        # Colored terminal logging
+│   ├── config.py             # Centralized configuration
+│   ├── models.py             # Data models (Pydantic)
+│   └── pipeline.py           # Main RAG pipeline orchestrator
+│
+├── run.py                    # CLI entry point
+├── requirements.txt          # Python dependencies
+├── .env.example              # Environment variable template
+└── README.md
+```
 
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/agentic-rag.git
-cd agentic-rag
+# Clone the repository
+git clone https://github.com/your-username/rag-system.git
+cd rag-system
+
+# Create virtual environment
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate        # Linux/Mac
+# .venv\Scripts\activate         # Windows
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-## Configuration
+## Setup
 
-Copy the environment template and update values:
+1. **Copy the environment template:**
+   ```bash
+   cp .env.example .env
+   ```
 
-```bash
-cp .env.example .env
-```
+2. **Configure your LLM provider** (edit `.env`):
 
-Then fill in your provider credentials and configuration values.
+   - **OpenAI** (recommended): Set `LLM_PROVIDER=openai` and add your `OPENAI_API_KEY`
+   - **Google Gemini**: Set `LLM_PROVIDER=gemini` and add your `GEMINI_API_KEY`
+   - **Ollama** (free, local): Set `LLM_PROVIDER=ollama` and [install Ollama](https://ollama.ai)
+
+3. **Place documents** in the `data/raw/` folder (PDF, TXT, CSV, or MD files)
 
 ## Usage
 
 ### Ingest Documents
 
 ```bash
-python scripts/ingest.py data/raw/
+# Ingest all documents from data/raw/
+python run.py ingest data/raw/
+
+# Ingest specific files
+python run.py ingest report.pdf faq.txt data.csv
+
+# Check what's indexed
+python run.py stats
 ```
 
-### Start the API
+### Chat / Ask Questions
 
 ```bash
-uvicorn app.main:app --reload
+# Interactive mode (REPL)
+python run.py chat
+
+# One-shot query
+python run.py chat "What is the return policy?"
+
+# With debug info (shows retrieval scores)
+python run.py chat --debug "How do I reset my password?"
 ```
 
-Open the API docs at `http://localhost:8000/docs`.
-
-### Run the Streamlit UI
+### Index Management
 
 ```bash
-streamlit run ui/streamlit_app.py
+# View index statistics
+python run.py stats
+
+# Reset entire index (deletes all chunks)
+python run.py reset
 ```
 
-Open the UI at `http://localhost:8501`.
+## Example Queries
 
-## Screenshots
+```
+You: What is the return policy for electronics?
+✓ [SUCCESS]
+──────────────────────────────────────────────────────────────
+According to the documents, the electronics return policy allows
+returns within 15 days of purchase. [Source: sample_sop.txt]
 
-> Screenshot placeholders — add your own UI images here after capture.
+📚 Sources:
+  [1] sample_sop.txt  — score: 0.847
 
-![Screenshot placeholder](https://via.placeholder.com/1200x600?text=Streamlit+UI+Screenshot+Placeholder)
-
-### Query the System
-
-```bash
-python scripts/query.py "What is the return policy?"
-python scripts/query.py --session demo123
-python scripts/query.py --debug
+You: What is the weather in Tokyo?
+⚠️ [NO_RELEVANT_CONTEXT]
+──────────────────────────────────────────────────────────────
+I could not find relevant information in the uploaded documents.
 ```
 
-## API Reference
+## Technologies Used
 
-### `GET /health`
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| Language | Python 3.11+ | Core runtime |
+| Embeddings | sentence-transformers (all-MiniLM-L6-v2) | Local vector generation (384-dim) |
+| Vector DB | ChromaDB | Persistent similarity search |
+| LLM | OpenAI / Gemini / Ollama | Answer generation |
+| Text Splitting | LangChain Text Splitters | Paragraph-aware chunking |
+| PDF Parsing | pypdf | PDF text extraction |
+| Configuration | Pydantic Settings | Type-safe env loading |
 
-Returns the current health and index status.
+## Hallucination Prevention
 
-### `POST /query`
+The system uses a **three-layer defense** to prevent the LLM from making up information:
 
-Submit a user query to the RAG pipeline.
+### Layer 1: Similarity Threshold
+Retrieved chunks are filtered by a configurable similarity threshold (default: 0.35). If no chunks pass the threshold, the LLM is **never called** — preventing it from receiving weak context and confabulating.
 
-Example:
+### Layer 2: Grounded System Prompt
+The LLM receives strict instructions to answer ONLY from the provided context. It must cite sources and respond with a specific fallback phrase if the context is insufficient.
 
-```bash
-curl -X POST http://localhost:8000/query   -H "Content-Type: application/json"   -d '{"query": "What is the return policy?", "session_id": "demo-123"}'
-```
+### Layer 3: Template-Driven Fallback
+When retrieval confidence is low, the fallback response is a **Python template** — not LLM-generated. This is 100% deterministic and impossible to hallucinate. The system will respond:
 
-### `POST /ingest/upload`
+> *"I could not find relevant information in the uploaded documents."*
 
-Upload files directly through the API.
+## Configuration
 
-```bash
-curl -X POST http://localhost:8000/ingest/upload   -F "files=@my_document.pdf"   -F "files=@report.txt"
-```
+All settings are in `.env` (see `.env.example`):
 
-### `GET /ingest/stats`
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_PROVIDER` | `openai` | LLM backend (`openai`, `gemini`, `ollama`) |
+| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence-transformer model |
+| `CHUNK_SIZE` | `500` | Characters per chunk |
+| `CHUNK_OVERLAP` | `50` | Overlap between chunks |
+| `RETRIEVAL_TOP_K` | `5` | Number of chunks to retrieve |
+| `SIMILARITY_THRESHOLD` | `0.70` | Minimum relevance score |
 
-Returns index statistics and indexed document metadata.
+## Limitations
 
-### `DELETE /ingest/document`
+- **PDF complexity**: Works best with single-column text PDFs. Multi-column layouts or scanned documents may have extraction issues.
+- **Tabular data**: CSV rows converted to prose embed reasonably well, but complex tables may lose structure.
+- **Long documents**: For very long documents (50+ pages), answers requiring synthesis across distant sections may miss context.
+- **First query latency**: The embedding model loads on first use (~2-3 seconds). Subsequent queries are fast.
 
-Delete indexed chunks for a specific source file.
+## Future Improvements
 
-```bash
-curl -X DELETE http://localhost:8000/ingest/document   -H "Content-Type: application/json"   -d '{"source_file": "sample_sop.txt"}'
-```
-
-## CLI Reference
-
-```bash
-# Ingest
-python scripts/ingest.py data/raw/
-python scripts/ingest.py report.pdf faq.txt
-python scripts/ingest.py --stats
-python scripts/ingest.py --reset
-
-# Query
-python scripts/query.py
-python scripts/query.py "Your question here"
-python scripts/query.py --debug
-```
-
-## Project Structure
-
-```text
-app/                 # Application logic and API layer
-configs/             # Configuration and prompt templates
-data/                # Raw data, processed files, and persistent store
-docs/                # Architecture and project write-up
-scripts/             # CLI tooling for ingestion, querying, evaluation
-tests/               # Unit and integration tests
-ui/                  # Optional Streamlit demo UI
-```
-
-## Deployment
-
-For production deployment, use a managed process supervisor and TLS termination.
-
-Example:
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
-```
-
-Recommended enhancements:
-
-- Use a reverse proxy such as Nginx
-- Store conversation memory in Redis for scale
-- Persist ChromaDB storage on durable disk
-- Add a monitoring/alerting layer
-
-## Contribution
-
-1. Open an issue for new features or bugs.
-2. Fork the repository.
-3. Create a branch.
-4. Add tests for new behavior.
-5. Submit a pull request with a clear summary.
+- Hybrid retrieval (BM25 + semantic) for better keyword matching
+- Cross-encoder reranking for improved precision
+- Streaming LLM responses for lower perceived latency
+- Web UI (Streamlit) for non-technical users
+- Multi-language document support
+- OCR support for scanned PDFs
 
 ## License
 
