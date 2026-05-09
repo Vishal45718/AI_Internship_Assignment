@@ -272,6 +272,75 @@ class OllamaClient(BaseLLMClient):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# OpenRouter (Unified API)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class OpenRouterClient(BaseLLMClient):
+    """OpenRouter API client (OpenAI compatible)."""
+
+    def __init__(self) -> None:
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise RuntimeError("openai not installed. Run: pip install openai")
+
+        settings = get_settings()
+        if not settings.openrouter_api_key:
+            raise RuntimeError("OPENROUTER_API_KEY is not set in .env")
+
+        self._client = OpenAI(
+            base_url=settings.openrouter_base_url,
+            api_key=settings.openrouter_api_key,
+        )
+        self._model = settings.openrouter_model
+        logger.info("OpenRouter client ready: model=%s", self._model)
+
+    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    temperature=0.1,
+                )
+                return response.choices[0].message.content or ""
+            except Exception as exc:
+                logger.error("OpenRouter attempt %d failed: %s", attempt, exc)
+                if attempt < _MAX_RETRIES:
+                    time.sleep(_RETRY_DELAY)
+        raise LLMError(f"OpenRouter failed after {_MAX_RETRIES} attempts")
+
+    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None):
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
+
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=0.1,
+                stream=True,
+            )
+            for chunk in response:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as exc:
+            logger.error("OpenRouter streaming failed: %s", exc)
+            raise LLMError(f"OpenRouter streaming failed: {exc}")
+
+    @property
+    def model_name(self) -> str:
+        return f"openrouter/{self._model}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Factory
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -286,5 +355,7 @@ def create_llm_client() -> BaseLLMClient:
         return GeminiClient()
     elif provider == "ollama":
         return OllamaClient()
+    elif provider == "openrouter":
+        return OpenRouterClient()
     else:
-        raise ValueError(f"Unknown LLM provider: '{provider}'. Use: openai, gemini, or ollama")
+        raise ValueError(f"Unknown LLM provider: '{provider}'. Use: openai, gemini, ollama, or openrouter")
