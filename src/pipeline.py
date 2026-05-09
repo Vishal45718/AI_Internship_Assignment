@@ -118,27 +118,43 @@ class RAGPipeline:
 
     # ── Querying ──────────────────────────────────────────────────────────────
 
-    def query(self, question: str) -> dict[str, Any]:
+    def query(self, question: str, mode: str = "document", history: list[dict[str, str]] | None = None) -> dict[str, Any]:
         """
-        Answer a question using the RAG pipeline.
-
-        Pipeline steps:
-          1. Check if vector store has data
-          2. Retrieve relevant chunks with threshold filtering
-          3. If no relevant chunks found → return fallback (no hallucination)
-          4. Build grounded prompt with source citations
-          5. Generate answer from LLM
-          6. Return answer with source references
+        Answer a question using the RAG pipeline or general chat.
 
         Args:
             question: User's natural language question.
-
-        Returns:
-            Dict with answer, sources, and metadata.
+            mode: "document" for RAG, "general" for general AI chat.
+            history: List of previous conversation turns [{"role": "user", "content": "..."}, ...]
         """
         question = question.strip()
         if not question:
             return {"answer": "Please provide a question.", "sources": [], "status": "error"}
+
+        if mode == "general":
+            return self._query_general(question, history)
+        else:
+            return self._query_document(question, history)
+
+    def _query_general(self, question: str, history: list[dict[str, str]] | None) -> dict[str, Any]:
+        system_prompt = "You are a helpful AI assistant. Answer the user's questions clearly and concisely."
+        try:
+            answer = self._llm.generate(
+                system_prompt=system_prompt,
+                user_message=question,
+                history=history,
+            )
+            return {
+                "answer": answer,
+                "sources": [],
+                "status": "success",
+                "confidence": 1.0,
+            }
+        except Exception as exc:
+            logger.error("LLM generation failed: %s", exc)
+            return {"answer": f"Error generating answer: {exc}", "sources": [], "status": "error"}
+
+    def _query_document(self, question: str, history: list[dict[str, str]] | None) -> dict[str, Any]:
 
         # Step 1: Check if we have any documents
         if self._store.count() == 0:
@@ -170,6 +186,7 @@ class RAGPipeline:
             answer = self._llm.generate(
                 system_prompt=system_prompt,
                 user_message=f"Question: {question}",
+                history=history,
             )
         except Exception as exc:
             logger.error("LLM generation failed: %s", exc)
@@ -196,6 +213,56 @@ class RAGPipeline:
             "status": "success",
             "confidence": round(result.top_score, 3),
         }
+
+    def stream_query(self, question: str, mode: str = "document", history: list[dict[str, str]] | None = None):
+        """
+        Yields (chunk_type, data) where chunk_type is "token" or "sources" or "error".
+        """
+        question = question.strip()
+        if not question:
+            yield "error", "Please provide a question."
+            return
+
+        if mode == "general":
+            system_prompt = "You are a helpful AI assistant. Answer the user's questions clearly and concisely."
+            try:
+                for token in self._llm.stream(system_prompt, question, history):
+                    yield "token", token
+            except Exception as exc:
+                logger.error("LLM streaming failed: %s", exc)
+                yield "error", f"Error generating answer: {exc}"
+            return
+
+        # Document mode
+        if self._store.count() == 0:
+            yield "error", "No documents have been ingested yet. Please ingest documents first."
+            return
+
+        result = self._retriever.retrieve(query=question)
+        if not result.passed_threshold:
+            yield "token", FALLBACK_RESPONSE
+            return
+
+        sources = [
+            {
+                "file": chunk.source_file,
+                "page": chunk.page_number,
+                "score": round(chunk.similarity_score, 3),
+                "preview": chunk.preview,
+            }
+            for chunk in result.chunks
+        ]
+        yield "sources", sources
+
+        context_str = self._format_context(result.chunks)
+        system_prompt = RAG_SYSTEM_PROMPT.format(context=context_str)
+
+        try:
+            for token in self._llm.stream(system_prompt, f"Question: {question}", history):
+                yield "token", token
+        except Exception as exc:
+            logger.error("LLM streaming failed: %s", exc)
+            yield "error", f"Error generating answer: {exc}"
 
     def _format_context(self, chunks: list) -> str:
         """Format retrieved chunks into the labeled context block for the LLM."""

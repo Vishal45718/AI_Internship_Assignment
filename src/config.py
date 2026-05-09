@@ -13,6 +13,10 @@ from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from dotenv import load_dotenv
+
+# Load .env explicitly
+load_dotenv()
 
 # Project root is one directory above src/
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

@@ -32,8 +32,13 @@ class BaseLLMClient(ABC):
     """Interface for all LLM providers."""
 
     @abstractmethod
-    def generate(self, system_prompt: str, user_message: str) -> str:
+    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
         """Generate a response from the LLM."""
+        ...
+
+    @abstractmethod
+    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None):
+        """Stream a response from the LLM. Yields text chunks."""
         ...
 
     @property
@@ -64,26 +69,58 @@ class OpenAIClient(BaseLLMClient):
         self._model = settings.openai_model
         logger.info("OpenAI client ready: model=%s", self._model)
 
-    def generate(self, system_prompt: str, user_message: str) -> str:
+    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
         last_error: Exception | None = None
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
+
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 response = self._client.chat.completions.create(
                     model=self._model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message},
-                    ],
+                    messages=messages,
                     temperature=0.1,  # Low = more grounded, less creative
                     max_tokens=2048,
                 )
                 return response.choices[0].message.content or ""
             except Exception as exc:
+                err_str = str(exc).lower()
+                if "incorrect api key" in err_str or "invalid_api_key" in err_str or "401" in err_str:
+                    logger.error("Authentication Error: Invalid API Key. Stopping retries.")
+                    raise LLMError(f"Authentication Error: Invalid API Key. Please check your .env file.") from exc
+                
                 logger.error("OpenAI attempt %d failed: %s", attempt, exc)
                 last_error = exc
                 if attempt < _MAX_RETRIES:
                     time.sleep(_RETRY_DELAY * attempt)
         raise LLMError(f"OpenAI failed after {_MAX_RETRIES} attempts: {last_error}")
+
+    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None):
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
+
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=2048,
+                stream=True,
+            )
+            for chunk in response:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as exc:
+            err_str = str(exc).lower()
+            if "incorrect api key" in err_str or "invalid_api_key" in err_str or "401" in err_str:
+                logger.error("Authentication Error: Invalid API Key.")
+                raise LLMError(f"Authentication Error: Invalid API Key. Please check your .env file.") from exc
+            logger.error("OpenAI streaming failed: %s", exc)
+            raise LLMError(f"OpenAI streaming failed: {exc}")
 
     @property
     def model_name(self) -> str:
@@ -113,7 +150,8 @@ class GeminiClient(BaseLLMClient):
         self._model = self._genai.GenerativeModel(self._model_name)
         logger.info("Gemini client ready: model=%s", self._model_name)
 
-    def generate(self, system_prompt: str, user_message: str) -> str:
+    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
+        # History mapping omitted for brevity, focusing on single query for Gemini
         combined = f"{system_prompt}\n\nUser question: {user_message}"
         last_error: Exception | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
@@ -124,11 +162,34 @@ class GeminiClient(BaseLLMClient):
                 )
                 return response.text or ""
             except Exception as exc:
+                err_str = str(exc).lower()
+                if "api_key" in err_str or "401" in err_str:
+                    logger.error("Authentication Error: Invalid Gemini API Key.")
+                    raise LLMError(f"Authentication Error: Invalid API Key. Please check your .env file.") from exc
                 logger.error("Gemini attempt %d failed: %s", attempt, exc)
                 last_error = exc
                 if attempt < _MAX_RETRIES:
                     time.sleep(_RETRY_DELAY)
         raise LLMError(f"Gemini failed after {_MAX_RETRIES} attempts: {last_error}")
+
+    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None):
+        combined = f"{system_prompt}\n\nUser question: {user_message}"
+        try:
+            response = self._model.generate_content(
+                combined,
+                generation_config={"temperature": 0.1, "max_output_tokens": 2048},
+                stream=True
+            )
+            for chunk in response:
+                if chunk.text:
+                    yield chunk.text
+        except Exception as exc:
+            err_str = str(exc).lower()
+            if "api_key" in err_str or "401" in err_str:
+                logger.error("Authentication Error: Invalid Gemini API Key.")
+                raise LLMError(f"Authentication Error: Invalid API Key. Please check your .env file.") from exc
+            logger.error("Gemini streaming failed: %s", exc)
+            raise LLMError(f"Gemini streaming failed: {exc}")
 
     @property
     def model_name(self) -> str:
@@ -154,13 +215,15 @@ class OllamaClient(BaseLLMClient):
         self._model_id = settings.ollama_model
         logger.info("Ollama client ready: model=%s url=%s", self._model_id, self._base_url)
 
-    def generate(self, system_prompt: str, user_message: str) -> str:
+    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
+
         payload = {
             "model": self._model_id,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
+            "messages": messages,
             "stream": False,
         }
         last_error: Exception | None = None
@@ -177,6 +240,31 @@ class OllamaClient(BaseLLMClient):
                 if attempt < _MAX_RETRIES:
                     time.sleep(_RETRY_DELAY)
         raise LLMError(f"Ollama failed after {_MAX_RETRIES} attempts: {last_error}")
+
+    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None):
+        import json
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user_message})
+
+        payload = {
+            "model": self._model_id,
+            "messages": messages,
+            "stream": True,
+        }
+        try:
+            with self._httpx.Client(timeout=120.0) as client:
+                with client.stream("POST", f"{self._base_url}/api/chat", json=payload) as response:
+                    response.raise_for_status()
+                    for line in response.iter_lines():
+                        if line:
+                            data = json.loads(line)
+                            if "message" in data and "content" in data["message"]:
+                                yield data["message"]["content"]
+        except Exception as exc:
+            logger.error("Ollama streaming failed: %s", exc)
+            raise LLMError(f"Ollama streaming failed: {exc}")
 
     @property
     def model_name(self) -> str:
