@@ -1,233 +1,116 @@
-# 📄 RAG System — Document Q&A with Hallucination Prevention
+# 📄 Full-Stack Agentic RAG — ChatGPT-style Document Q&A
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)](https://python.org)
+[![Next.js](https://img.shields.io/badge/Next.js-15+-black?logo=next.js)](https://nextjs.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green?logo=fastapi)](https://fastapi.tiangolo.com)
 [![ChromaDB](https://img.shields.io/badge/VectorDB-ChromaDB-orange)](https://www.trychroma.com)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## Overview
 
-A clean, modular **Retrieval-Augmented Generation (RAG)** system that answers questions strictly from your uploaded documents. The system ingests documents in multiple formats, chunks and embeds them into a local vector database, and uses semantic retrieval + LLM generation to provide grounded, source-cited answers.
-
-**Key principle:** If the answer isn't in the documents, the system says so honestly — no hallucination.
+A complete, production-ready **Retrieval-Augmented Generation (RAG)** web application with a ChatGPT-style UI. 
+The system features two chat modes:
+1. **General AI**: Conversational AI assistant.
+2. **Document Chat**: Grounded Q&A against your uploaded documents with strict hallucination prevention and source citations.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     INGESTION PIPELINE                      │
-│                                                             │
-│  PDF/TXT/CSV/MD → Load → Clean → Chunk → Embed → Store     │
-│                                                             │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                     ChromaDB (local)
-                           │
-┌──────────────────────────┴──────────────────────────────────┐
-│                      QUERY PIPELINE                         │
-│                                                             │
-│  Question → Retrieve → Threshold Check → Prompt → LLM →    │
-│                  ↓                          ↓               │
-│           Below threshold?           Above threshold?       │
-│                  ↓                          ↓               │
-│         "Not found in docs"         Grounded Answer +       │
-│         (no LLM call)               Source Citations        │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
+│  Next.js (UI)   │ ────> │  FastAPI (API)  │ ────> │    ChromaDB     │
+│  TailwindCSS    │ <──── │  Streaming SSE  │ <──── │  (Vector DB)    │
+└─────────────────┘       └─────────────────┘       └─────────────────┘
+                                   │
+                                   v
+                          LLM (OpenAI / Gemini / Ollama)
 ```
 
 ## Features
 
-- **Multi-format ingestion**: PDF, TXT, Markdown, CSV
-- **Smart chunking**: Paragraph-aware splitting (500 chars, 50 overlap)
-- **Local embeddings**: `sentence-transformers/all-MiniLM-L6-v2` — no API costs
-- **Persistent vector store**: ChromaDB with cosine similarity search
-- **Similarity threshold filtering**: Only uses chunks above confidence threshold
-- **Hallucination prevention**: Three-layer defense system
-- **Source citations**: Every answer references the source document
-- **Multiple LLM providers**: OpenAI, Google Gemini, or Ollama (local)
-- **Simple CLI**: Ingest docs and ask questions from the terminal
-- **Idempotent ingestion**: Re-ingesting updates, doesn't duplicate
+- **ChatGPT-style Web UI**: Beautiful responsive design with dark mode, markdown rendering, and real-time streaming.
+- **Two Chat Modes**: Toggle between General AI and Ask Documents seamlessly.
+- **Multi-format upload**: Upload PDF, TXT, CSV, or Markdown directly from the UI.
+- **Persistent Conversation History**: Chats are saved via an SQLite backend.
+- **Hallucination prevention**: Built-in similarity thresholding ensures the LLM admits when it doesn't know.
+- **Source citations**: Responses cite the exact file and similarity score used to generate the answer.
+- **Robust Error Handling**: Fails gracefully on invalid API keys without retrying blindly.
 
-## Folder Structure
+## Setup Instructions
 
-```
-project/
-│
-├── data/
-│   ├── raw/                  # Place your documents here
-│   └── vectorstore/          # ChromaDB persistence (auto-created)
-│
-├── src/
-│   ├── ingestion/
-│   │   ├── loaders.py        # PDF, TXT, CSV, Markdown loaders
-│   │   └── chunker.py        # Text splitting with metadata
-│   ├── processing/
-│   │   └── text.py           # Text cleaning & normalization
-│   ├── embeddings/
-│   │   └── embedder.py       # Sentence-transformer embeddings
-│   ├── vectordb/
-│   │   └── store.py          # ChromaDB vector store wrapper
-│   ├── retrieval/
-│   │   └── retriever.py      # Semantic search + threshold filter
-│   ├── llm/
-│   │   ├── client.py         # LLM provider abstraction
-│   │   └── prompts.py        # Prompt templates
-│   ├── utils/
-│   │   ├── hashing.py        # Content hashing for dedup
-│   │   └── logging.py        # Colored terminal logging
-│   ├── config.py             # Centralized configuration
-│   ├── models.py             # Data models (Pydantic)
-│   └── pipeline.py           # Main RAG pipeline orchestrator
-│
-├── run.py                    # CLI entry point
-├── requirements.txt          # Python dependencies
-├── .env.example              # Environment variable template
-└── README.md
-```
-
-## Installation
+### 1. Backend Setup (Python)
 
 ```bash
 # Clone the repository
 git clone https://github.com/your-username/rag-system.git
 cd rag-system
 
-# Create virtual environment
+# Create virtual environment and install dependencies
 python -m venv .venv
-source .venv/bin/activate        # Linux/Mac
-# .venv\Scripts\activate         # Windows
-
-# Install dependencies
+source .venv/bin/activate
 pip install -r requirements.txt
+
+# Configure environment
+cp .env.example .env
 ```
+Edit `.env` and add your `OPENAI_API_KEY` (or configure Gemini / Ollama).
 
-## Setup
-
-1. **Copy the environment template:**
-   ```bash
-   cp .env.example .env
-   ```
-
-2. **Configure your LLM provider** (edit `.env`):
-
-   - **OpenAI** (recommended): Set `LLM_PROVIDER=openai` and add your `OPENAI_API_KEY`
-   - **Google Gemini**: Set `LLM_PROVIDER=gemini` and add your `GEMINI_API_KEY`
-   - **Ollama** (free, local): Set `LLM_PROVIDER=ollama` and [install Ollama](https://ollama.ai)
-
-3. **Place documents** in the `data/raw/` folder (PDF, TXT, CSV, or MD files)
-
-## Usage
-
-### Ingest Documents
+### 2. Frontend Setup (Node.js)
 
 ```bash
-# Ingest all documents from data/raw/
-python run.py ingest data/raw/
-
-# Ingest specific files
-python run.py ingest report.pdf faq.txt data.csv
-
-# Check what's indexed
-python run.py stats
+cd frontend
+npm install
 ```
 
-### Chat / Ask Questions
+## Running the Application
 
+You need two terminal windows to run both the backend and frontend.
+
+**Terminal 1 (Backend)**:
 ```bash
-# Interactive mode (REPL)
-python run.py chat
-
-# One-shot query
-python run.py chat "What is the return policy?"
-
-# With debug info (shows retrieval scores)
-python run.py chat --debug "How do I reset my password?"
+source .venv/bin/activate
+python run_server.py --reload
 ```
+*API runs at http://localhost:8000*
 
-### Index Management
-
+**Terminal 2 (Frontend)**:
 ```bash
-# View index statistics
-python run.py stats
-
-# Reset entire index (deletes all chunks)
-python run.py reset
+cd frontend
+npm run dev
 ```
+*UI runs at http://localhost:3000*
 
-## Example Queries
+Open `http://localhost:3000` in your browser.
+
+## VS Code Environment Configuration
+
+If you encounter API Key issues, ensure your VS Code terminal loads `.env` variables automatically:
+1. Open VS Code Settings (`Ctrl + ,`)
+2. Search for: `python.terminal.useEnvFile`
+3. Check the box to enable it.
+4. Restart your terminal.
+
+## Project Structure
 
 ```
-You: What is the return policy for electronics?
-✓ [SUCCESS]
-──────────────────────────────────────────────────────────────
-According to the documents, the electronics return policy allows
-returns within 15 days of purchase. [Source: sample_sop.txt]
-
-📚 Sources:
-  [1] sample_sop.txt  — score: 0.847
-
-You: What is the weather in Tokyo?
-⚠️ [NO_RELEVANT_CONTEXT]
-──────────────────────────────────────────────────────────────
-I could not find relevant information in the uploaded documents.
+project/
+├── backend/                  # FastAPI Application Layer
+│   └── app/
+│       ├── api/              # API Routers (Chat, Upload, History)
+│       ├── storage/          # SQLite DB schema and session
+│       └── main.py           # FastAPI entry point
+│
+├── frontend/                 # Next.js Application Layer
+│   ├── src/app/              # Next.js Pages (page.tsx, globals.css)
+│   └── package.json          
+│
+├── src/                      # Core RAG Pipeline (Reusable Module)
+│   ├── ingestion/            # PDF/CSV loaders and Chunker
+│   ├── embeddings/           # sentence-transformers
+│   ├── vectordb/             # ChromaDB interface
+│   ├── retrieval/            # Semantic search
+│   ├── llm/                  # Streaming LLM clients (OpenAI/Gemini/Ollama)
+│   └── pipeline.py           # Core orchestrator logic
+│
+├── data/                     # Vector DB and Uploaded Files (ignored in git)
+├── run.py                    # Legacy CLI entry point
+└── run_server.py             # FastAPI entry point
 ```
-
-## Technologies Used
-
-| Component | Technology | Purpose |
-|-----------|-----------|---------|
-| Language | Python 3.11+ | Core runtime |
-| Embeddings | sentence-transformers (all-MiniLM-L6-v2) | Local vector generation (384-dim) |
-| Vector DB | ChromaDB | Persistent similarity search |
-| LLM | OpenAI / Gemini / Ollama | Answer generation |
-| Text Splitting | LangChain Text Splitters | Paragraph-aware chunking |
-| PDF Parsing | pypdf | PDF text extraction |
-| Configuration | Pydantic Settings | Type-safe env loading |
-
-## Hallucination Prevention
-
-The system uses a **three-layer defense** to prevent the LLM from making up information:
-
-### Layer 1: Similarity Threshold
-Retrieved chunks are filtered by a configurable similarity threshold (default: 0.35). If no chunks pass the threshold, the LLM is **never called** — preventing it from receiving weak context and confabulating.
-
-### Layer 2: Grounded System Prompt
-The LLM receives strict instructions to answer ONLY from the provided context. It must cite sources and respond with a specific fallback phrase if the context is insufficient.
-
-### Layer 3: Template-Driven Fallback
-When retrieval confidence is low, the fallback response is a **Python template** — not LLM-generated. This is 100% deterministic and impossible to hallucinate. The system will respond:
-
-> *"I could not find relevant information in the uploaded documents."*
-
-## Configuration
-
-All settings are in `.env` (see `.env.example`):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LLM_PROVIDER` | `openai` | LLM backend (`openai`, `gemini`, `ollama`) |
-| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence-transformer model |
-| `CHUNK_SIZE` | `500` | Characters per chunk |
-| `CHUNK_OVERLAP` | `50` | Overlap between chunks |
-| `RETRIEVAL_TOP_K` | `5` | Number of chunks to retrieve |
-| `SIMILARITY_THRESHOLD` | `0.70` | Minimum relevance score |
-
-## Limitations
-
-- **PDF complexity**: Works best with single-column text PDFs. Multi-column layouts or scanned documents may have extraction issues.
-- **Tabular data**: CSV rows converted to prose embed reasonably well, but complex tables may lose structure.
-- **Long documents**: For very long documents (50+ pages), answers requiring synthesis across distant sections may miss context.
-- **First query latency**: The embedding model loads on first use (~2-3 seconds). Subsequent queries are fast.
-
-## Future Improvements
-
-- Hybrid retrieval (BM25 + semantic) for better keyword matching
-- Cross-encoder reranking for improved precision
-- Streaming LLM responses for lower perceived latency
-- Web UI (Streamlit) for non-technical users
-- Multi-language document support
-- OCR support for scanned PDFs
-
-## License
-
-This project is licensed under the MIT License. See `LICENSE` for details.
