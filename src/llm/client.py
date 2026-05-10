@@ -316,6 +316,18 @@ class OpenRouterClient(BaseLLMClient):
                 )
                 return response.choices[0].message.content or ""
             except Exception as exc:
+                err_str = str(exc).lower()
+                if "not a valid model id" in err_str or "invalid model" in err_str or "model not found" in err_str:
+                    logger.error("OpenRouter invalid model configured: %s", self._model)
+                    raise LLMError(
+                        f"Invalid OPENROUTER_MODEL '{self._model}'. "
+                        "Use a supported OpenRouter model like google/gemini-2.0-flash-001."
+                    ) from exc
+                if "incorrect api key" in err_str or "invalid_api_key" in err_str or "401" in err_str:
+                    logger.error("Authentication Error: Invalid OpenRouter API Key.")
+                    raise LLMError(
+                        "Authentication Error: Invalid OpenRouter API Key. Please check your .env file."
+                    ) from exc
                 logger.error("OpenRouter attempt %d failed: %s", attempt, exc)
                 if attempt < _MAX_RETRIES:
                     time.sleep(_RETRY_DELAY)
@@ -338,8 +350,20 @@ class OpenRouterClient(BaseLLMClient):
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
         except Exception as exc:
+            err_str = str(exc).lower()
+            if "not a valid model id" in err_str or "invalid model" in err_str or "model not found" in err_str:
+                logger.error("OpenRouter invalid model configured: %s", self._model)
+                raise LLMError(
+                    f"Invalid OPENROUTER_MODEL '{self._model}'. "
+                    "Use a supported OpenRouter model like google/gemini-2.0-flash-001."
+                ) from exc
+            if "incorrect api key" in err_str or "invalid_api_key" in err_str or "401" in err_str:
+                logger.error("Authentication Error: Invalid OpenRouter API Key.")
+                raise LLMError(
+                    "Authentication Error: Invalid OpenRouter API Key. Please check your .env file."
+                ) from exc
             logger.error("OpenRouter streaming failed: %s", exc)
-            raise LLMError(f"OpenRouter streaming failed: {exc}")
+            raise LLMError(f"OpenRouter streaming failed: {exc}") from exc
 
     @property
     def model_name(self) -> str:
