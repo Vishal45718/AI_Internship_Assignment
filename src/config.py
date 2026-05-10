@@ -7,6 +7,7 @@ Uses Pydantic for type validation and clear error messages.
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -14,6 +15,8 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # Load .env explicitly
 load_dotenv()
@@ -52,8 +55,36 @@ class Settings(BaseSettings):
 
     # OpenRouter
     openrouter_api_key: str = Field(default="", description="OpenRouter API key.")
-    openrouter_model: str = Field(default="google/gemini-1.5-flash")
+    openrouter_model: str = Field(default="google/gemini-2.0-flash-001")
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
+
+    @field_validator("openrouter_model", mode="before")
+    @classmethod
+    def validate_openrouter_model(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("OPENROUTER_MODEL must be set when using OpenRouter.")
+
+        normalized = value.strip()
+        deprecated_map = {
+            "google/gemini-1.5-flash": "google/gemini-2.0-flash-001",
+            "google/gemini-1.5-flash-latest": "google/gemini-2.0-flash-001",
+            "google/gemini-flash-1.5": "google/gemini-2.0-flash-001",
+        }
+        if normalized in deprecated_map:
+            logger.warning(
+                "OPENROUTER_MODEL '%s' is deprecated. Using '%s' instead.",
+                normalized,
+                deprecated_map[normalized],
+            )
+            normalized = deprecated_map[normalized]
+
+        if " " in normalized:
+            raise ValueError("OPENROUTER_MODEL must not contain spaces.")
+        if "/" not in normalized:
+            raise ValueError(
+                "OPENROUTER_MODEL must be a valid OpenRouter model identifier, e.g. google/gemini-2.0-flash-001"
+            )
+        return normalized
 
     # ── Embedding ────────────────────────────────────────────────────────────
     embedding_model: str = Field(
