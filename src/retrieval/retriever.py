@@ -13,7 +13,6 @@ instead of asking the LLM to answer from weak context.
 from __future__ import annotations
 
 import logging
-import math
 import re
 from typing import Any
 
@@ -44,6 +43,7 @@ class SemanticRetriever:
         top_k: int | None = None,
         filters: dict[str, Any] | None = None,
         similarity_threshold: float | None = None,
+        expand_context: bool = True,
     ) -> RetrievalResult:
         """
         Retrieve semantically relevant chunks for a query.
@@ -53,6 +53,7 @@ class SemanticRetriever:
             top_k: Number of chunks to retrieve (defaults to config).
             filters: Optional metadata filters for narrowing scope.
             similarity_threshold: Minimum score to include a result.
+            expand_context: Whether to expand context with neighboring chunks.
 
         Returns:
             RetrievalResult with ranked chunks and pass/fail flag.
@@ -110,12 +111,45 @@ class SemanticRetriever:
                     query[:60], threshold, top_score,
                 )
 
+            final_chunks = above_threshold
+            original_chunk_ids = [c.chunk_id for c in above_threshold]
+            parent_sections_used: list[str] = []
+            overlap_reduction_count = 0
+            expanded_context_token_count = self._estimate_token_count(final_chunks)
+            if passed and expand_context and self._settings.parent_context_enabled:
+                (
+                    final_chunks,
+                    parent_sections_used,
+                    overlap_reduction_count,
+                    expanded_context_token_count,
+                ) = self._expand_context(
+                    above_threshold,
+                    self._settings.parent_window_before,
+                    self._settings.parent_window_after,
+                )
+                logger.info(
+                    "Hybrid context expansion: original=%d expanded=%d (before=%d after=%d)",
+                    len(above_threshold), len(final_chunks),
+                    self._settings.parent_window_before, self._settings.parent_window_after,
+                )
+                logger.debug("Original retrieved chunk IDs: %s", original_chunk_ids)
+                logger.debug("Expanded chunk IDs: %s", [c.chunk_id for c in final_chunks])
+                logger.debug("Parent sections used: %s", parent_sections_used)
+                logger.debug("Overlap reduction count: %d", overlap_reduction_count)
+                logger.debug("Final context token count: %d", expanded_context_token_count)
+                logger.debug("Retrieval chunk count: %d", len(final_chunks))
+
             return RetrievalResult(
                 query=query,
-                chunks=above_threshold,
+                chunks=final_chunks,
                 total_retrieved=total_retrieved,
                 top_score=top_score,
                 passed_threshold=passed,
+                original_chunk_ids=original_chunk_ids,
+                expanded_chunk_ids=[c.chunk_id for c in final_chunks],
+                parent_sections_used=parent_sections_used,
+                expanded_context_token_count=expanded_context_token_count,
+                overlap_reduction_count=overlap_reduction_count,
             )
 
         raw_chunks: list[RetrievedChunk] = self._store.query(
@@ -138,12 +172,45 @@ class SemanticRetriever:
                 query[:60], threshold, top_score,
             )
 
+        final_chunks = above_threshold
+        original_chunk_ids = [c.chunk_id for c in above_threshold]
+        parent_sections_used: list[str] = []
+        overlap_reduction_count = 0
+        expanded_context_token_count = self._estimate_token_count(final_chunks)
+        if passed and expand_context and self._settings.parent_context_enabled:
+            (
+                final_chunks,
+                parent_sections_used,
+                overlap_reduction_count,
+                expanded_context_token_count,
+            ) = self._expand_context(
+                above_threshold,
+                self._settings.parent_window_before,
+                self._settings.parent_window_after,
+            )
+            logger.info(
+                "Context expansion: original=%d expanded=%d (before=%d after=%d)",
+                len(above_threshold), len(final_chunks),
+                self._settings.parent_window_before, self._settings.parent_window_after,
+            )
+            logger.debug("Original retrieved chunk IDs: %s", original_chunk_ids)
+            logger.debug("Expanded chunk IDs: %s", [c.chunk_id for c in final_chunks])
+            logger.debug("Parent sections used: %s", parent_sections_used)
+            logger.debug("Overlap reduction count: %d", overlap_reduction_count)
+            logger.debug("Final context token count: %d", expanded_context_token_count)
+            logger.debug("Retrieval chunk count: %d", len(final_chunks))
+
         return RetrievalResult(
             query=query,
-            chunks=above_threshold,
+            chunks=final_chunks,
             total_retrieved=total_retrieved,
             top_score=top_score,
             passed_threshold=passed,
+            original_chunk_ids=original_chunk_ids,
+            expanded_chunk_ids=[c.chunk_id for c in final_chunks],
+            parent_sections_used=parent_sections_used,
+            expanded_context_token_count=expanded_context_token_count,
+            overlap_reduction_count=overlap_reduction_count,
         )
 
     def _merge_hybrid_results(
@@ -194,6 +261,9 @@ class SemanticRetriever:
                 source_type=entry["chunk"].source_type,
                 page_number=entry["chunk"].page_number,
                 chunk_index=entry["chunk"].chunk_index,
+                parent_id=entry["chunk"].parent_id,
+                document_name=entry["chunk"].document_name,
+                section_title=entry["chunk"].section_title,
                 similarity_score=round(fused_score, 4),
             )
             fused_results.append(fused_chunk)
@@ -210,3 +280,79 @@ class SemanticRetriever:
             if re.search(rf"\b{re.escape(term.lower())}\b", lowered_text):
                 return True
         return False
+
+    def _expand_context(
+        self,
+        retrieved_chunks: list[RetrievedChunk],
+        window_before: int = 1,
+        window_after: int = 1,
+    ) -> tuple[list[RetrievedChunk], list[str], int, int]:
+        """
+        Expand retrieved chunks with neighboring context.
+
+        For each retrieved chunk:
+        - Fetch neighboring chunks (before and after)
+        - Deduplicate by chunk_id
+        - Maintain page/chunk ordering
+        """
+        if not retrieved_chunks or (window_before == 0 and window_after == 0):
+            token_count = self._estimate_token_count(retrieved_chunks)
+            return retrieved_chunks, [], 0, token_count
+
+        expanded_ids: set[str] = set()
+        context_chunks: dict[str, RetrievedChunk] = {}
+        parent_sections_used: set[str] = set()
+
+        for chunk in retrieved_chunks:
+            expanded_ids.add(chunk.chunk_id)
+            context_chunks[chunk.chunk_id] = chunk
+            if chunk.section_title:
+                parent_sections_used.add(chunk.section_title)
+
+        neighbors = self._store.get_neighboring_chunks(
+            chunk_ids=[c.chunk_id for c in retrieved_chunks],
+            window_before=window_before,
+            window_after=window_after,
+        )
+
+        for neighbor in neighbors:
+            if neighbor.chunk_id not in expanded_ids:
+                context_chunks[neighbor.chunk_id] = neighbor
+                expanded_ids.add(neighbor.chunk_id)
+            if neighbor.section_title:
+                parent_sections_used.add(neighbor.section_title)
+
+        if self._settings.parent_expand_full_section:
+            section_seed_chunks = list(context_chunks.values())
+            for seed in section_seed_chunks:
+                if not seed.section_title:
+                    continue
+                section_chunks = self._store.get_chunks_by_section(
+                    source_file=seed.source_file,
+                    section_title=seed.section_title,
+                )
+                for section_chunk in section_chunks:
+                    if section_chunk.chunk_id not in expanded_ids:
+                        context_chunks[section_chunk.chunk_id] = section_chunk
+                        expanded_ids.add(section_chunk.chunk_id)
+                    if section_chunk.section_title:
+                        parent_sections_used.add(section_chunk.section_title)
+
+        final_chunks = list(context_chunks.values())
+        final_chunks.sort(key=lambda c: (c.page_number or 0, c.chunk_index))
+
+        overlap_reduction = max(0, len(retrieved_chunks) + len(neighbors) - len(final_chunks))
+        token_count = self._estimate_token_count(final_chunks)
+        logger.debug(
+            "Expanded context: original_ids=%d final_ids=%d overlaps_added=%d",
+            len(retrieved_chunks), len(final_chunks), overlap_reduction,
+        )
+
+        return final_chunks, sorted(parent_sections_used), overlap_reduction, token_count
+
+    def _estimate_token_count(self, chunks: list[RetrievedChunk]) -> int:
+        """Approximate token count for debug observability."""
+        if not chunks:
+            return 0
+        total_chars = sum(len(c.content) for c in chunks)
+        return max(1, total_chars // 4)
