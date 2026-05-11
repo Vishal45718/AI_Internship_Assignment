@@ -26,10 +26,6 @@ from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Maximum characters of context to inject (prevents context window overflow)
-MAX_CONTEXT_CHARS = 6000
-
-
 class RAGPipeline:
     """
     Clean RAG pipeline for document Q&A.
@@ -42,6 +38,7 @@ class RAGPipeline:
 
     def __init__(self) -> None:
         logger.info("Initializing RAG pipeline…")
+        self._settings = get_settings()
 
         # Initialize all components
         self._embedder = create_embedder()
@@ -168,12 +165,15 @@ class RAGPipeline:
         # Step 2: Retrieve relevant chunks
         result = self._retriever.retrieve(query=question, expand_context=True)
 
-        print(f"Original retrieved chunk IDs: {result.original_chunk_ids}")
-        print(f"Expanded chunk IDs: {result.expanded_chunk_ids}")
-        print(f"Parent sections used: {result.parent_sections_used}")
-        print(f"Retrieval chunk count: {len(result.chunks)}")
+        print(f"Retrieved chunk count: {result.retrieved_chunk_count}")
+        print(f"Reranked chunk count: {result.reranked_chunk_count}")
+        print(f"Expanded chunk count: {result.expanded_chunk_count}")
+        print(f"Final chunk count: {result.final_chunk_count}")
         print(f"Expanded context token count: {result.expanded_context_token_count}")
         print(f"Overlap reduction count: {result.overlap_reduction_count}")
+        print(f"Selected chunk IDs: {[chunk.chunk_id for chunk in result.chunks]}")
+        print(f"Page numbers: {[chunk.page_number for chunk in result.chunks]}")
+        print(f"Rerank scores: {[round(chunk.rerank_score, 4) for chunk in result.chunks]}")
 
         # Step 3: Fallback if no relevant chunks found (hallucination prevention)
         if not result.passed_threshold:
@@ -204,15 +204,7 @@ class RAGPipeline:
             }
 
         # Step 6: Return answer with sources
-        sources = [
-            {
-                "file": chunk.source_file,
-                "page": chunk.page_number,
-                "score": round(chunk.similarity_score, 3),
-                "preview": chunk.preview,
-            }
-            for chunk in result.chunks
-        ]
+        sources = self._dedupe_sources(result.chunks)
 
         return {
             "answer": answer,
@@ -250,15 +242,7 @@ class RAGPipeline:
             yield "token", FALLBACK_RESPONSE
             return
 
-        sources = [
-            {
-                "file": chunk.source_file,
-                "page": chunk.page_number,
-                "score": round(chunk.similarity_score, 3),
-                "preview": chunk.preview,
-            }
-            for chunk in result.chunks
-        ]
+        sources = self._dedupe_sources(result.chunks)
         yield "sources", sources
 
         context_str = self._format_context(result.chunks)
@@ -280,19 +264,43 @@ class RAGPipeline:
         total_chars = 0
 
         for chunk in chunks:
+            score = chunk.rerank_score if chunk.rerank_score > 0 else chunk.similarity_score
             page_info = f", Page {chunk.page_number}" if chunk.page_number else ""
             chunk_str = CONTEXT_CHUNK_TEMPLATE.format(
                 source_file=chunk.source_file,
                 page_info=page_info,
-                score=chunk.similarity_score,
+                score=score,
                 content=chunk.content,
             )
-            if total_chars + len(chunk_str) > MAX_CONTEXT_CHARS:
+            max_context_chars = self._settings.max_context_tokens * 4
+            if total_chars + len(chunk_str) > max_context_chars:
                 break
             formatted.append(chunk_str)
             total_chars += len(chunk_str)
 
         return "\n\n".join(formatted)
+
+    def _dedupe_sources(self, chunks: list) -> list[dict[str, Any]]:
+        grouped: dict[tuple[str, int | None], Any] = {}
+        for chunk in chunks:
+            key = (chunk.source_file, chunk.page_number)
+            score = chunk.rerank_score if chunk.rerank_score > 0 else chunk.similarity_score
+            existing = grouped.get(key)
+            if existing is None or score > existing["_score"]:
+                grouped[key] = {
+                    "file": chunk.source_file,
+                    "page": chunk.page_number,
+                    "score": round(score, 3),
+                    "preview": chunk.preview,
+                    "_score": score,
+                }
+
+        deduped = list(grouped.values())
+        deduped.sort(key=lambda item: item["_score"], reverse=True)
+        top_sources = deduped[:5]
+        for item in top_sources:
+            item.pop("_score", None)
+        return top_sources
 
     # ── Index management ──────────────────────────────────────────────────────
 
