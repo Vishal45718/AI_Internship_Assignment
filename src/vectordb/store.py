@@ -25,6 +25,15 @@ from src.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+def _normalize_get_field(values: list[Any] | None) -> list[Any]:
+    """Normalize Chroma get() output for single-query and multi-query shapes."""
+    if not values:
+        return []
+    if isinstance(values, list) and values and isinstance(values[0], list):
+        return values[0]
+    return values
+
+
 class ChromaVectorStore:
     """
     Persistent ChromaDB vector store.
@@ -163,6 +172,9 @@ class ChromaVectorStore:
                     source_type=meta.get("source_type", "unknown"),
                     page_number=meta.get("page_number"),
                     chunk_index=meta.get("chunk_index", 0),
+                    parent_id=meta.get("parent_id", ""),
+                    document_name=meta.get("document_name", ""),
+                    section_title=meta.get("section_title", ""),
                     similarity_score=round(similarity, 4),
                 )
             )
@@ -272,6 +284,9 @@ class ChromaVectorStore:
                         source_type=metadata.get("source_type", "unknown"),
                         page_number=metadata.get("page_number"),
                         chunk_index=metadata.get("chunk_index", 0),
+                        parent_id=metadata.get("parent_id", ""),
+                        document_name=metadata.get("document_name", ""),
+                        section_title=metadata.get("section_title", ""),
                         similarity_score=min(1.0, round(score, 4)),
                     ),
                 )
@@ -279,6 +294,120 @@ class ChromaVectorStore:
 
         keyword_candidates.sort(key=lambda item: item[0], reverse=True)
         return [candidate for _, candidate in keyword_candidates[:k]]
+
+    def get_chunks_by_indices(self, source_file: str, indices: list[int]) -> list[RetrievedChunk]:
+        """Retrieve chunks from one source by chunk indices."""
+        if not indices:
+            return []
+
+        unique_indices = sorted(set(indices))
+        where: dict[str, Any] = {"$and": [{"source_file": source_file}]}
+        if len(unique_indices) == 1:
+            where["$and"].append({"chunk_index": unique_indices[0]})
+        else:
+            where["$and"].append({"chunk_index": {"$in": unique_indices}})
+
+        results = self._collection.get(include=["documents", "metadatas"], where=where)
+        documents = _normalize_get_field(results.get("documents"))
+        metadatas = _normalize_get_field(results.get("metadatas"))
+
+        if not documents or not metadatas:
+            return []
+
+        retrieved: list[RetrievedChunk] = []
+        for doc, meta in zip(documents, metadatas):
+            retrieved.append(
+                RetrievedChunk(
+                    chunk_id=meta.get("chunk_id", ""),
+                    content=doc,
+                    source_file=meta.get("source_file", "unknown"),
+                    source_type=meta.get("source_type", "unknown"),
+                    page_number=meta.get("page_number"),
+                    chunk_index=meta.get("chunk_index", 0),
+                    parent_id=meta.get("parent_id", ""),
+                    document_name=meta.get("document_name", ""),
+                    section_title=meta.get("section_title", ""),
+                    similarity_score=1.0,
+                )
+            )
+
+        retrieved.sort(key=lambda c: c.chunk_index)
+        return retrieved
+
+    def get_neighboring_chunks(
+        self,
+        chunk_ids: list[str],
+        window_before: int = 1,
+        window_after: int = 1,
+    ) -> list[RetrievedChunk]:
+        """
+        Retrieve neighboring chunks for each chunk id.
+
+        Neighboring candidates are selected from the same source file
+        using chunk_index proximity.
+        """
+        if not chunk_ids or (window_before == 0 and window_after == 0):
+            return []
+
+        neighbors_by_id: dict[str, RetrievedChunk] = {}
+        for chunk_id in chunk_ids:
+            seed_results = self._collection.get(
+                ids=[chunk_id],
+                include=["documents", "metadatas"],
+            )
+            seed_metadatas = _normalize_get_field(seed_results.get("metadatas"))
+            if not seed_metadatas:
+                continue
+
+            seed_meta = seed_metadatas[0]
+            source_file = seed_meta.get("source_file")
+            seed_index = seed_meta.get("chunk_index")
+            if source_file is None or seed_index is None:
+                continue
+
+            start = int(seed_index) - max(0, window_before)
+            end = int(seed_index) + max(0, window_after)
+            indices = [i for i in range(start, end + 1) if i >= 0]
+            for candidate in self.get_chunks_by_indices(source_file, indices):
+                neighbors_by_id[candidate.chunk_id] = candidate
+
+        return list(neighbors_by_id.values())
+
+    def get_chunks_by_section(self, source_file: str, section_title: str) -> list[RetrievedChunk]:
+        """Retrieve all chunks from a specific source + section title."""
+        if not source_file or not section_title:
+            return []
+
+        where = {
+            "$and": [
+                {"source_file": source_file},
+                {"section_title": section_title},
+            ]
+        }
+        results = self._collection.get(include=["documents", "metadatas"], where=where)
+        documents = _normalize_get_field(results.get("documents"))
+        metadatas = _normalize_get_field(results.get("metadatas"))
+        if not documents or not metadatas:
+            return []
+
+        retrieved: list[RetrievedChunk] = []
+        for doc, meta in zip(documents, metadatas):
+            retrieved.append(
+                RetrievedChunk(
+                    chunk_id=meta.get("chunk_id", ""),
+                    content=doc,
+                    source_file=meta.get("source_file", "unknown"),
+                    source_type=meta.get("source_type", "unknown"),
+                    page_number=meta.get("page_number"),
+                    chunk_index=meta.get("chunk_index", 0),
+                    parent_id=meta.get("parent_id", ""),
+                    document_name=meta.get("document_name", ""),
+                    section_title=meta.get("section_title", ""),
+                    similarity_score=1.0,
+                )
+            )
+        retrieved.sort(key=lambda c: (c.page_number or 0, c.chunk_index))
+        return retrieved
 
     def reset(self) -> None:
         """Delete and recreate the collection. ⚠️ Destructive."""
