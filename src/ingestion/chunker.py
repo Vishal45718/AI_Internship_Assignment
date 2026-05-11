@@ -80,6 +80,9 @@ class DocumentChunker:
                 chunk_index=idx,
                 char_count=len(chunk_text),
                 ingestion_timestamp=ingestion_ts,
+                parent_id=document.id,
+                document_name=document.metadata.source_file,
+                section_title=document.metadata.extra.get("section_title", ""),
             )
             chunks.append(DocumentChunk(content=chunk_text.strip(), metadata=meta))
 
