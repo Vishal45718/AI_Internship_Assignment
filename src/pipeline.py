@@ -166,7 +166,14 @@ class RAGPipeline:
             }
 
         # Step 2: Retrieve relevant chunks
-        result = self._retriever.retrieve(query=question)
+        result = self._retriever.retrieve(query=question, expand_context=True)
+
+        print(f"Original retrieved chunk IDs: {result.original_chunk_ids}")
+        print(f"Expanded chunk IDs: {result.expanded_chunk_ids}")
+        print(f"Parent sections used: {result.parent_sections_used}")
+        print(f"Retrieval chunk count: {len(result.chunks)}")
+        print(f"Expanded context token count: {result.expanded_context_token_count}")
+        print(f"Overlap reduction count: {result.overlap_reduction_count}")
 
         # Step 3: Fallback if no relevant chunks found (hallucination prevention)
         if not result.passed_threshold:
