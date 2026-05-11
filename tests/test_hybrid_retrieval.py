@@ -100,11 +100,11 @@ class HybridRetrievalTest(unittest.TestCase):
         original_value = settings.hybrid_search_enabled
         original_parent = settings.parent_context_enabled
         original_section = settings.parent_expand_full_section
-        original_threshold = settings.similarity_threshold
+        original_threshold = settings.retrieval_score_threshold
         settings.hybrid_search_enabled = True
         settings.parent_context_enabled = False
         settings.parent_expand_full_section = False
-        settings.similarity_threshold = 0.70
+        settings.retrieval_score_threshold = 0.55
         try:
             retriever = SemanticRetriever(MockStore())
             result = retriever.retrieve("What is ReAL?", top_k=5, expand_context=False)
@@ -118,7 +118,7 @@ class HybridRetrievalTest(unittest.TestCase):
             settings.hybrid_search_enabled = original_value
             settings.parent_context_enabled = original_parent
             settings.parent_expand_full_section = original_section
-            settings.similarity_threshold = original_threshold
+            settings.retrieval_score_threshold = original_threshold
 
 
 class ParentDocumentRetrievalTest(unittest.TestCase):
@@ -155,10 +155,10 @@ class ParentDocumentRetrievalTest(unittest.TestCase):
         settings = get_settings()
         original_enabled = settings.parent_context_enabled
         original_section = settings.parent_expand_full_section
-        original_threshold = settings.similarity_threshold
+        original_threshold = settings.retrieval_score_threshold
         settings.parent_context_enabled = False
         settings.parent_expand_full_section = False
-        settings.similarity_threshold = 0.70
+        settings.retrieval_score_threshold = 0.55
 
         try:
             retriever = SemanticRetriever(MockStore())
@@ -172,7 +172,7 @@ class ParentDocumentRetrievalTest(unittest.TestCase):
         finally:
             settings.parent_context_enabled = original_enabled
             settings.parent_expand_full_section = original_section
-            settings.similarity_threshold = original_threshold
+            settings.retrieval_score_threshold = original_threshold
 
 
 if __name__ == "__main__":

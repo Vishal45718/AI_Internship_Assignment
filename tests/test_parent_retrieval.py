@@ -109,14 +109,14 @@ class ParentContextRetrievalTest(unittest.TestCase):
         self.original_before = self.settings.parent_window_before
         self.original_after = self.settings.parent_window_after
         self.original_section = self.settings.parent_expand_full_section
-        self.original_threshold = self.settings.similarity_threshold
+        self.original_threshold = self.settings.retrieval_score_threshold
         self.original_hybrid = self.settings.hybrid_search_enabled
         
         self.settings.parent_context_enabled = True
         self.settings.parent_window_before = 1
         self.settings.parent_window_after = 1
         self.settings.parent_expand_full_section = False
-        self.settings.similarity_threshold = 0.5
+        self.settings.retrieval_score_threshold = 0.55
         self.settings.hybrid_search_enabled = False
 
     def tearDown(self):
@@ -124,7 +124,7 @@ class ParentContextRetrievalTest(unittest.TestCase):
         self.settings.parent_window_before = self.original_before
         self.settings.parent_window_after = self.original_after
         self.settings.parent_expand_full_section = self.original_section
-        self.settings.similarity_threshold = self.original_threshold
+        self.settings.retrieval_score_threshold = self.original_threshold
         self.settings.hybrid_search_enabled = self.original_hybrid
 
     def test_seakr_consistency(self):
