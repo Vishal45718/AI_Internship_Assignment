@@ -120,6 +120,8 @@ class RetrievedChunk(BaseModel):
     parent_id: str = ""
     document_name: str = ""
     section_title: str = ""
+    retrieval_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    rerank_score: float = Field(default=0.0, ge=0.0, le=1.0)
     similarity_score: float = Field(ge=0.0, le=1.0)
 
     @property
@@ -146,3 +148,7 @@ class RetrievalResult(BaseModel):
     parent_sections_used: list[str] = Field(default_factory=list)
     expanded_context_token_count: int = 0
     overlap_reduction_count: int = 0
+    retrieved_chunk_count: int = 0
+    reranked_chunk_count: int = 0
+    expanded_chunk_count: int = 0
+    final_chunk_count: int = 0
