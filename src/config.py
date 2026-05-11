@@ -104,6 +104,18 @@ class Settings(BaseSettings):
         description="Enable hybrid retrieval combining vector similarity and keyword/BM25 ranking.",
     )
 
+    # ── Context Expansion ────────────────────────────────────────────────────
+    parent_context_enabled: bool = Field(
+        default=True,
+        description="Enable Parent Document Retrieval (Small-to-Big Retrieval).",
+    )
+    parent_window_before: int = Field(default=1, ge=0)
+    parent_window_after: int = Field(default=1, ge=0)
+    parent_expand_full_section: bool = Field(
+        default=False,
+        description="Optionally include all chunks from a matching section title.",
+    )
+
     # ── Chunking ─────────────────────────────────────────────────────────────
     chunk_size: int = Field(default=500, ge=100, le=4000)
     chunk_overlap: int = Field(default=50, ge=0, le=200)
