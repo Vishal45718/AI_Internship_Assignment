@@ -75,6 +75,9 @@ class ChunkMetadata(BaseModel):
     chunk_index: int = Field(..., description="Position within document (0-indexed).")
     char_count: int = Field(default=0, ge=0)
     ingestion_timestamp: str = Field(default="")
+    parent_id: str = Field(default="", description="Parent document or section ID.")
+    document_name: str = Field(default="", description="Name of the document.")
+    section_title: str = Field(default="", description="Section or parent title.")
 
     def to_chroma_dict(self) -> dict[str, Any]:
         """Flatten metadata for ChromaDB (values must be str/int/float/bool)."""
@@ -86,6 +89,9 @@ class ChunkMetadata(BaseModel):
             "chunk_index": self.chunk_index,
             "char_count": self.char_count,
             "ingestion_timestamp": self.ingestion_timestamp,
+            "parent_id": self.parent_id,
+            "document_name": self.document_name,
+            "section_title": self.section_title,
         }
         if self.page_number is not None:
             d["page_number"] = self.page_number
@@ -111,6 +117,9 @@ class RetrievedChunk(BaseModel):
     source_type: str
     page_number: int | None = None
     chunk_index: int = 0
+    parent_id: str = ""
+    document_name: str = ""
+    section_title: str = ""
     similarity_score: float = Field(ge=0.0, le=1.0)
 
     @property
@@ -132,3 +141,8 @@ class RetrievalResult(BaseModel):
     total_retrieved: int = 0
     top_score: float = 0.0
     passed_threshold: bool = False
+    original_chunk_ids: list[str] = Field(default_factory=list)
+    expanded_chunk_ids: list[str] = Field(default_factory=list)
+    parent_sections_used: list[str] = Field(default_factory=list)
+    expanded_context_token_count: int = 0
+    overlap_reduction_count: int = 0
