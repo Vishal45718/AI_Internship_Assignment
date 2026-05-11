@@ -97,7 +97,12 @@ class Settings(BaseSettings):
     chroma_collection_name: str = Field(default="rag_documents")
 
     # ── Retrieval ────────────────────────────────────────────────────────────
-    retrieval_top_k: int = Field(default=5, ge=1, le=20)
+    retrieval_top_k: int = Field(default=20, ge=1, le=100)
+    rerank_top_k: int = Field(default=5, ge=1, le=30)
+    final_context_chunks: int = Field(default=8, ge=1, le=30)
+    max_context_tokens: int = Field(default=3500, ge=256, le=12000)
+    retrieval_score_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    rerank_score_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
     similarity_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
     hybrid_search_enabled: bool = Field(
         default=False,
