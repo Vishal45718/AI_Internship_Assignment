@@ -175,6 +175,7 @@ class ChromaVectorStore:
                     parent_id=meta.get("parent_id", ""),
                     document_name=meta.get("document_name", ""),
                     section_title=meta.get("section_title", ""),
+                    retrieval_score=round(similarity, 4),
                     similarity_score=round(similarity, 4),
                 )
             )
@@ -287,6 +288,7 @@ class ChromaVectorStore:
                         parent_id=metadata.get("parent_id", ""),
                         document_name=metadata.get("document_name", ""),
                         section_title=metadata.get("section_title", ""),
+                        retrieval_score=min(1.0, round(score, 4)),
                         similarity_score=min(1.0, round(score, 4)),
                     ),
                 )
@@ -327,6 +329,7 @@ class ChromaVectorStore:
                     parent_id=meta.get("parent_id", ""),
                     document_name=meta.get("document_name", ""),
                     section_title=meta.get("section_title", ""),
+                    retrieval_score=1.0,
                     similarity_score=1.0,
                 )
             )
@@ -403,6 +406,7 @@ class ChromaVectorStore:
                     parent_id=meta.get("parent_id", ""),
                     document_name=meta.get("document_name", ""),
                     section_title=meta.get("section_title", ""),
+                    retrieval_score=1.0,
                     similarity_score=1.0,
                 )
             )
