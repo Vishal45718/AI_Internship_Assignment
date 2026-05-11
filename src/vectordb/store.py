@@ -15,6 +15,8 @@ Key design decisions:
 from __future__ import annotations
 
 import logging
+import math
+import re
 from typing import Any
 
 from src.models import DocumentChunk, RetrievedChunk
@@ -192,6 +194,91 @@ class ChromaVectorStore:
             source_counts[sf]["chunk_count"] += 1
 
         return sorted(source_counts.values(), key=lambda x: x["source_file"])
+
+    def keyword_search(
+        self,
+        query_text: str,
+        top_k: int | None = None,
+        where: dict[str, Any] | None = None,
+    ) -> list[RetrievedChunk]:
+        """
+        Keyword/BM25-style retrieval over stored chunk text.
+
+        This is a lightweight fallback for exact identifiers, acronyms,
+        and case-sensitive tokens that dense semantic search may miss.
+        """
+        settings = get_settings()
+        k = min(top_k or settings.retrieval_top_k, self._collection.count() or 1)
+
+        if self._collection.count() == 0:
+            logger.warning("Vector store is empty for keyword search.")
+            return []
+
+        terms = [t for t in re.findall(r"\w+", query_text) if t]
+        if not terms:
+            logger.warning("Keyword search skipped empty query terms.")
+            return []
+
+        results = self._collection.get(include=["documents", "metadatas"], where=where)
+        documents = results.get("documents", [[]])[0]
+        metadatas = results.get("metadatas", [[]])[0]
+        if not documents or not metadatas:
+            return []
+
+        lower_docs = [doc.lower() for doc in documents]
+        corpus_size = len(lower_docs)
+        df: dict[str, int] = {}
+        for term in terms:
+            pattern = re.compile(rf"\b{re.escape(term.lower())}\b")
+            df[term] = sum(1 for doc in lower_docs if pattern.search(doc))
+
+        avg_dl = sum(len(doc.split()) for doc in lower_docs) / max(corpus_size, 1)
+        keyword_candidates: list[tuple[float, RetrievedChunk]] = []
+
+        for document, metadata, lowered in zip(documents, metadatas, lower_docs):
+            doc_len = max(len(lowered.split()), 1)
+            score = 0.0
+            exact_term_match = False
+
+            for term in terms:
+                term_pattern = re.compile(rf"\b{re.escape(term.lower())}\b")
+                term_count = len(term_pattern.findall(lowered))
+                if term_count == 0:
+                    continue
+
+                exact_term_pattern = re.compile(rf"\b{re.escape(term)}\b", flags=re.IGNORECASE)
+                if exact_term_pattern.search(document):
+                    exact_term_match = True
+
+                doc_freq = max(df.get(term, 0), 1)
+                idf = math.log((corpus_size - doc_freq + 0.5) / (doc_freq + 0.5) + 1)
+                k1 = 1.5
+                b = 0.75
+                score += idf * ((term_count * (k1 + 1)) / (term_count + k1 * (1 - b + b * doc_len / avg_dl)))
+
+            if score <= 0:
+                continue
+
+            if exact_term_match:
+                score += 1.5
+
+            keyword_candidates.append(
+                (
+                    score,
+                    RetrievedChunk(
+                        chunk_id=metadata.get("chunk_id", ""),
+                        content=document,
+                        source_file=metadata.get("source_file", "unknown"),
+                        source_type=metadata.get("source_type", "unknown"),
+                        page_number=metadata.get("page_number"),
+                        chunk_index=metadata.get("chunk_index", 0),
+                        similarity_score=min(1.0, round(score, 4)),
+                    ),
+                )
+            )
+
+        keyword_candidates.sort(key=lambda item: item[0], reverse=True)
+        return [candidate for _, candidate in keyword_candidates[:k]]
 
     def reset(self) -> None:
         """Delete and recreate the collection. ⚠️ Destructive."""

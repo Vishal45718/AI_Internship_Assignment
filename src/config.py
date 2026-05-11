@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     # ── Retrieval ────────────────────────────────────────────────────────────
     retrieval_top_k: int = Field(default=5, ge=1, le=20)
     similarity_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
+    hybrid_search_enabled: bool = Field(
+        default=False,
+        description="Enable hybrid retrieval combining vector similarity and keyword/BM25 ranking.",
+    )
 
     # ── Chunking ─────────────────────────────────────────────────────────────
     chunk_size: int = Field(default=500, ge=100, le=4000)
