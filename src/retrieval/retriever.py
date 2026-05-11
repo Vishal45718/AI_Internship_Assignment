@@ -18,6 +18,7 @@ from typing import Any
 
 from src.models import RetrievedChunk, RetrievalResult
 from src.config import get_settings
+from src.retrieval.reranker import CrossEncoderReranker
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class SemanticRetriever:
     def __init__(self, vector_store) -> None:
         self._store = vector_store
         self._settings = get_settings()
+        self._reranker = CrossEncoderReranker()
 
     def retrieve(
         self,
@@ -63,7 +65,7 @@ class SemanticRetriever:
             return RetrievalResult(query=query)
 
         k = top_k or self._settings.retrieval_top_k
-        threshold = similarity_threshold or self._settings.similarity_threshold
+        threshold = similarity_threshold or self._settings.retrieval_score_threshold
 
         # Check if the store has any data
         if self._store.count() == 0:
@@ -83,73 +85,11 @@ class SemanticRetriever:
             )
 
             merged_chunks = self._merge_hybrid_results(query, vector_chunks, keyword_chunks)
-            total_retrieved = len(merged_chunks)
-            top_score = merged_chunks[0].similarity_score if merged_chunks else 0.0
-            semantic_above_ids = {
-                c.chunk_id for c in vector_chunks if c.similarity_score >= threshold
-            }
-            above_threshold = [
-                c for c in merged_chunks
-                if c.similarity_score >= threshold
-                or self._contains_exact_token(c.content, query)
-                or c.chunk_id in semantic_above_ids
-            ]
-            passed = len(above_threshold) > 0
-
-            logger.info(
-                "Hybrid retrieval: vector_hits=%d keyword_hits=%d fused_hits=%d",
-                len(vector_chunks), len(keyword_chunks), len(merged_chunks),
-            )
-            logger.debug(
-                "Hybrid top candidates: %s",
-                [f"{c.chunk_id}:{c.similarity_score:.4f}" for c in merged_chunks[:10]],
-            )
-
-            if not passed:
-                logger.info(
-                    "Query '%s…' — no hybrid candidates above threshold %.2f (top fused: %.3f)",
-                    query[:60], threshold, top_score,
-                )
-
-            final_chunks = above_threshold
-            original_chunk_ids = [c.chunk_id for c in above_threshold]
-            parent_sections_used: list[str] = []
-            overlap_reduction_count = 0
-            expanded_context_token_count = self._estimate_token_count(final_chunks)
-            if passed and expand_context and self._settings.parent_context_enabled:
-                (
-                    final_chunks,
-                    parent_sections_used,
-                    overlap_reduction_count,
-                    expanded_context_token_count,
-                ) = self._expand_context(
-                    above_threshold,
-                    self._settings.parent_window_before,
-                    self._settings.parent_window_after,
-                )
-                logger.info(
-                    "Hybrid context expansion: original=%d expanded=%d (before=%d after=%d)",
-                    len(above_threshold), len(final_chunks),
-                    self._settings.parent_window_before, self._settings.parent_window_after,
-                )
-                logger.debug("Original retrieved chunk IDs: %s", original_chunk_ids)
-                logger.debug("Expanded chunk IDs: %s", [c.chunk_id for c in final_chunks])
-                logger.debug("Parent sections used: %s", parent_sections_used)
-                logger.debug("Overlap reduction count: %d", overlap_reduction_count)
-                logger.debug("Final context token count: %d", expanded_context_token_count)
-                logger.debug("Retrieval chunk count: %d", len(final_chunks))
-
-            return RetrievalResult(
+            return self._strict_pipeline_result(
                 query=query,
-                chunks=final_chunks,
-                total_retrieved=total_retrieved,
-                top_score=top_score,
-                passed_threshold=passed,
-                original_chunk_ids=original_chunk_ids,
-                expanded_chunk_ids=[c.chunk_id for c in final_chunks],
-                parent_sections_used=parent_sections_used,
-                expanded_context_token_count=expanded_context_token_count,
-                overlap_reduction_count=overlap_reduction_count,
+                candidates=merged_chunks,
+                retrieval_threshold=threshold,
+                expand_context=expand_context,
             )
 
         raw_chunks: list[RetrievedChunk] = self._store.query(
@@ -158,59 +98,90 @@ class SemanticRetriever:
             where=filters,
         )
 
-        total_retrieved = len(raw_chunks)
+        return self._strict_pipeline_result(
+            query=query,
+            candidates=raw_chunks,
+            retrieval_threshold=threshold,
+            expand_context=expand_context,
+        )
 
-        # Apply similarity threshold — this is the hallucination gate
-        above_threshold = [c for c in raw_chunks if c.similarity_score >= threshold]
+    def _strict_pipeline_result(
+        self,
+        query: str,
+        candidates: list[RetrievedChunk],
+        retrieval_threshold: float,
+        expand_context: bool,
+    ) -> RetrievalResult:
+        top_candidates = candidates[: self._settings.retrieval_top_k]
+        for c in top_candidates:
+            c.retrieval_score = c.similarity_score
 
-        top_score = raw_chunks[0].similarity_score if raw_chunks else 0.0
-        passed = len(above_threshold) > 0
-
-        if not passed:
-            logger.info(
-                "Query '%s…' — no chunks above threshold %.2f (top: %.3f)",
-                query[:60], threshold, top_score,
+        filtered = [
+            c
+            for c in top_candidates
+            if c.retrieval_score >= retrieval_threshold or self._contains_exact_token(c.content, query)
+        ]
+        if not filtered:
+            return RetrievalResult(
+                query=query,
+                total_retrieved=len(top_candidates),
+                top_score=top_candidates[0].similarity_score if top_candidates else 0.0,
+                passed_threshold=False,
             )
 
-        final_chunks = above_threshold
-        original_chunk_ids = [c.chunk_id for c in above_threshold]
+        reranked = self._rerank(query, filtered)[: self._settings.rerank_top_k]
+        reranked = [c for c in reranked if c.rerank_score >= self._settings.rerank_score_threshold]
+        if not reranked:
+            return RetrievalResult(
+                query=query,
+                total_retrieved=len(top_candidates),
+                top_score=top_candidates[0].similarity_score if top_candidates else 0.0,
+                passed_threshold=False,
+            )
+
+        base_ranked = list(reranked)
         parent_sections_used: list[str] = []
         overlap_reduction_count = 0
-        expanded_context_token_count = self._estimate_token_count(final_chunks)
-        if passed and expand_context and self._settings.parent_context_enabled:
-            (
-                final_chunks,
-                parent_sections_used,
-                overlap_reduction_count,
-                expanded_context_token_count,
-            ) = self._expand_context(
-                above_threshold,
+        if expand_context and self._settings.parent_context_enabled:
+            expanded, parent_sections_used, overlap_reduction_count, _ = self._expand_context(
+                base_ranked,
                 self._settings.parent_window_before,
                 self._settings.parent_window_after,
             )
-            logger.info(
-                "Context expansion: original=%d expanded=%d (before=%d after=%d)",
-                len(above_threshold), len(final_chunks),
-                self._settings.parent_window_before, self._settings.parent_window_after,
-            )
-            logger.debug("Original retrieved chunk IDs: %s", original_chunk_ids)
-            logger.debug("Expanded chunk IDs: %s", [c.chunk_id for c in final_chunks])
-            logger.debug("Parent sections used: %s", parent_sections_used)
-            logger.debug("Overlap reduction count: %d", overlap_reduction_count)
-            logger.debug("Final context token count: %d", expanded_context_token_count)
-            logger.debug("Retrieval chunk count: %d", len(final_chunks))
+        else:
+            expanded = base_ranked
+
+        # Enforce final chunk and token limits; remove lowest-ranked first.
+        final_chunks = self._apply_limits(expanded, base_ranked)
+        final_tokens = self._estimate_token_count(final_chunks)
+        final_chunks.sort(key=lambda c: (c.page_number or 0, c.chunk_index))
+        selected_ids = [c.chunk_id for c in final_chunks]
+        logger.info(
+            "retrieved=%d reranked=%d expanded=%d final=%d tokens=%d",
+            len(top_candidates), len(reranked), len(expanded), len(final_chunks), final_tokens,
+        )
+        logger.info(
+            "selected chunk IDs=%s pages=%s rerank_scores=%s",
+            selected_ids,
+            [c.page_number for c in final_chunks],
+            [round(c.rerank_score, 4) for c in final_chunks],
+        )
 
         return RetrievalResult(
             query=query,
             chunks=final_chunks,
-            total_retrieved=total_retrieved,
-            top_score=top_score,
-            passed_threshold=passed,
-            original_chunk_ids=original_chunk_ids,
-            expanded_chunk_ids=[c.chunk_id for c in final_chunks],
+            total_retrieved=len(top_candidates),
+            top_score=max((c.rerank_score for c in final_chunks), default=0.0),
+            passed_threshold=len(final_chunks) > 0,
+            original_chunk_ids=[c.chunk_id for c in base_ranked],
+            expanded_chunk_ids=[c.chunk_id for c in expanded],
             parent_sections_used=parent_sections_used,
-            expanded_context_token_count=expanded_context_token_count,
+            expanded_context_token_count=final_tokens,
             overlap_reduction_count=overlap_reduction_count,
+            retrieved_chunk_count=len(top_candidates),
+            reranked_chunk_count=len(reranked),
+            expanded_chunk_count=len(expanded),
+            final_chunk_count=len(final_chunks),
         )
 
     def _merge_hybrid_results(
@@ -264,6 +235,7 @@ class SemanticRetriever:
                 parent_id=entry["chunk"].parent_id,
                 document_name=entry["chunk"].document_name,
                 section_title=entry["chunk"].section_title,
+                retrieval_score=round(fused_score, 4),
                 similarity_score=round(fused_score, 4),
             )
             fused_results.append(fused_chunk)
@@ -280,6 +252,20 @@ class SemanticRetriever:
             if re.search(rf"\b{re.escape(term.lower())}\b", lowered_text):
                 return True
         return False
+
+    def _rerank(self, query: str, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+        if not chunks:
+            return []
+        scores = self._reranker.score(query, [c.content for c in chunks])
+        reranked: list[RetrievedChunk] = []
+        for chunk, score in zip(chunks, scores):
+            chunk.rerank_score = max(0.0, min(1.0, float(score)))
+            reranked.append(chunk)
+        reranked.sort(
+            key=lambda c: (c.rerank_score, c.retrieval_score, c.similarity_score),
+            reverse=True,
+        )
+        return reranked
 
     def _expand_context(
         self,
@@ -317,6 +303,16 @@ class SemanticRetriever:
 
         for neighbor in neighbors:
             if neighbor.chunk_id not in expanded_ids:
+                source_rank = max(
+                    (
+                        seed.rerank_score
+                        for seed in retrieved_chunks
+                        if seed.source_file == neighbor.source_file
+                    ),
+                    default=max((seed.rerank_score for seed in retrieved_chunks), default=0.0),
+                )
+                neighbor.rerank_score = source_rank * 0.95
+                neighbor.retrieval_score = source_rank * 0.95
                 context_chunks[neighbor.chunk_id] = neighbor
                 expanded_ids.add(neighbor.chunk_id)
             if neighbor.section_title:
@@ -333,6 +329,8 @@ class SemanticRetriever:
                 )
                 for section_chunk in section_chunks:
                     if section_chunk.chunk_id not in expanded_ids:
+                        section_chunk.rerank_score = seed.rerank_score
+                        section_chunk.retrieval_score = seed.retrieval_score
                         context_chunks[section_chunk.chunk_id] = section_chunk
                         expanded_ids.add(section_chunk.chunk_id)
                     if section_chunk.section_title:
@@ -349,6 +347,26 @@ class SemanticRetriever:
         )
 
         return final_chunks, sorted(parent_sections_used), overlap_reduction, token_count
+
+    def _apply_limits(
+        self,
+        expanded: list[RetrievedChunk],
+        base_ranked: list[RetrievedChunk],
+    ) -> list[RetrievedChunk]:
+        rank_map: dict[str, float] = {c.chunk_id: c.rerank_score for c in base_ranked}
+        for chunk in expanded:
+            if chunk.chunk_id not in rank_map:
+                # Neighbor chunks inherit closest available ranking.
+                rank_map[chunk.chunk_id] = max((c.rerank_score for c in base_ranked), default=0.0) * 0.95
+                chunk.rerank_score = rank_map[chunk.chunk_id]
+
+        kept = list(expanded)
+        kept.sort(key=lambda c: rank_map.get(c.chunk_id, 0.0), reverse=True)
+        kept = kept[: self._settings.final_context_chunks]
+
+        while kept and self._estimate_token_count(kept) > self._settings.max_context_tokens:
+            kept.pop()
+        return kept
 
     def _estimate_token_count(self, chunks: list[RetrievedChunk]) -> int:
         """Approximate token count for debug observability."""
