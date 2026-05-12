@@ -150,8 +150,8 @@ class StrictRetrievalPipelineTests(unittest.TestCase):
         self.settings.hybrid_search_enabled = True
         self.settings.retrieval_top_k = 20
         self.settings.rerank_top_k = 5
-        self.settings.final_context_chunks = 8
-        self.settings.max_context_tokens = 3500
+        self.settings.final_context_chunks = 5
+        self.settings.max_context_tokens = 1500
         self.settings.retrieval_score_threshold = 0.55
         self.settings.rerank_score_threshold = 0.20
         self.settings.parent_context_enabled = True
