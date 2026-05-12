@@ -1,114 +1,69 @@
 # Agentic RAG — Document Q&A with Grounded Answers
 
-A full-stack **Retrieval-Augmented Generation (RAG)** system for asking questions over your own documents. The backend ingests PDFs and other text sources, embeds them into a vector store, retrieves the most relevant passages, and generates answers that are **tied to retrieved evidence** to reduce unsupported claims.
+This repository implements a grounded Retrieval-Augmented Generation (RAG) system for question answering over uploaded documents. It combines a React/Next.js frontend, FastAPI backend, local embeddings, a Chroma vector store, and Ollama-based local inference.
 
-**Why RAG:** Large language models can generalize from training data; for paper-specific facts, method names, and thresholds, RAG grounds answers in *your* uploaded text instead of guessing.
+## What this project does
 
-**Focus:** Grounded document Q&A suited to research-style PDFs and technical notes, with retrieval quality signals and conservative behavior when evidence is weak.
+- Ingests PDF, TXT, CSV, and Markdown files
+- Converts documents into searchable chunks with provenance metadata
+- Embeds chunks using SentenceTransformers
+- Stores vectors in ChromaDB
+- Retrieves and reranks candidate passages for each query
+- Generates answer text with a local Ollama LLM
+- Surfaces evidence-backed responses and conservative fallbacks when support is weak
 
----
+## Why RAG matters
 
-## Features
+RAG is useful for document QA because it grounds answers in uploaded source material rather than relying solely on pretrained model knowledge. This is especially important for research papers, technical notes, and structured data where specific names, thresholds, and details must be drawn from the actual corpus.
 
-| Area | Description |
-|------|-------------|
-| **Document ingestion** | Load PDF, TXT, CSV, Markdown (and related) formats through the API. |
-| **Chunking** | Configurable text splitting with overlap for retrieval granularity. |
-| **Embeddings** | Local **SentenceTransformers** embeddings (default: `all-MiniLM-L6-v2`). |
-| **Chroma vector DB** | Persistent storage and similarity search over chunks. |
-| **Hybrid retrieval** | Optional fusion of dense (vector) and keyword-style retrieval. |
-| **Reranking** | Cross-encoder reranking to better align passages with the query. |
-| **Section-aware retrieval** | Context expansion using document structure (parent chunks / sections where enabled). |
-| **Grounded answering** | Prompts and checks steer the model to cite and stay within evidence. |
-| **Hallucination reduction** | Pre/post validation, entity-aware checks, and cautious fallbacks when support is weak. |
-| **Ollama local inference** | Run a local model (e.g. **phi3:mini**) without a cloud LLM API. |
-| **Frontend UI** | Next.js app: chat modes, upload, streaming responses, sources. |
-| **PDF upload** | Upload PDFs from the UI for indexing and Q&A. |
+## Supported formats
 
----
+- PDF
+- TXT
+- CSV
+- Markdown
 
-## Architecture
+CSV support is implemented as row-level ingestion rather than recursive chunking, which keeps chunk counts compact and avoids excessive vector generation.
 
-End-to-end flow:
+## Local inference with Ollama
 
-```text
-Upload → Chunking → Embeddings → Vector DB → Retrieval → Reranking → LLM Generation → Grounded Answer
-```
+The pipeline uses Ollama for local LLM inference to support offline or private deployments. Local inference reduces dependency on third-party APIs and keeps cost predictable, while the system design balances that with retrieval quality and grounded prompting.
 
-1. **Upload** — Files are received by the FastAPI backend and passed into the ingestion pipeline.  
-2. **Chunking** — Documents are split into overlapping chunks suitable for embedding and citation.  
-3. **Embeddings** — Each chunk is embedded with SentenceTransformers.  
-4. **Vector DB** — Embeddings and metadata are stored in **ChromaDB** for similarity search.  
-5. **Retrieval** — Queries retrieve top candidates; optional **hybrid** search improves recall on exact terms.  
-6. **Reranking** — A cross-encoder rescores candidates so the strongest passages surface first.  
-7. **LLM generation** — A local model via **Ollama** (or an alternate provider configured in `.env`) produces an answer conditioned on retrieved text.  
-8. **Grounded answer** — Evidence-first instructions and validation reduce answers that drift from the corpus.
+## Documentation
 
-```text
-┌─────────────┐     HTTP/SSE      ┌──────────────┐     ┌─────────────┐
-│  Next.js    │ ◄──────────────► │   FastAPI    │ ◄─► │  ChromaDB   │
-│  (React UI) │                  │   (Python)   │     │  (vectors)  │
-└─────────────┘                  └──────┬───────┘     └─────────────┘
-                                        │
-                                        ▼
-                                 ┌──────────────┐
-                                 │   Ollama     │
-                                 │  (local LLM) │
-                                 └──────────────┘
-```
+- `docs/system_design.md` — design goals, component responsibilities, and engineering decisions
+- `docs/architecture.md` — architecture flow, retrieval pipeline, grounding strategy, and diagrams
+- `docs/testing.md` — testing approach, evaluation scenarios, and limitations
 
----
-
-## Tech Stack
-
-| Layer | Technologies |
-|--------|----------------|
-| Backend | **Python**, **FastAPI** |
-| Vector store | **ChromaDB** |
-| Embeddings | **SentenceTransformers** |
-| Inference (local) | **Ollama** |
-| Frontend | **Next.js**, **React**, **TypeScript** |
-
-Additional libraries include SQLAlchemy/SQLite for conversation history, `httpx` for Ollama calls, and `pypdf` for PDF text extraction.
-
----
-
-## Setup
+## Quick setup
 
 ### Prerequisites
 
-- Python 3.11+ recommended  
-- Node.js 18+ (for the frontend)  
-- [Ollama](https://ollama.com) installed and running  
+- Python 3.11+
+- Node.js 18+
+- Ollama installed and running
 
-### 1. Clone and virtual environment
+### Python setup
 
 ```bash
-git clone <YOUR_REPOSITORY_URL>
-cd Intern_Assignment
-
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Ollama and model
-
-Install Ollama, then pull the default local model used in the example config:
+### Ollama model
 
 ```bash
 ollama pull phi3:mini
 ```
 
-Ensure the Ollama service is running (typically `http://localhost:11434`).
-
-### 3. Backend environment
+### Backend environment
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and set at minimum:
+Set at minimum:
 
 ```env
 LLM_PROVIDER=ollama
@@ -116,49 +71,41 @@ OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=phi3:mini
 ```
 
-Other keys (embedding path, Chroma location, retrieval thresholds) can remain as in `.env.example` until you tune them.
-
-### 4. Frontend environment
+### Frontend setup
 
 ```bash
 cd frontend
+npm install
 cp .env.local.example .env.local
 ```
 
-Default API base (matches local backend):
+Configure:
 
 ```env
 NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-Install dependencies:
+### Run the app
 
-```bash
-npm install
-```
-
-### 5. Run backend and frontend
-
-**Terminal 1 — API**
+Start the backend:
 
 ```bash
 source .venv/bin/activate
 python run_server.py --reload
 ```
 
-API: `http://127.0.0.1:8000` (health: `GET /`).
-
-**Terminal 2 — UI**
+Start the frontend:
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Open `http://localhost:3000` (or the port shown by Next.js).
+Open the UI at `http://localhost:3000`.
 
----
+## API routes
 
+<<<<<<< HEAD
 ## Example Queries
 
 After uploading one or more documents, try queries such as:
@@ -213,54 +160,33 @@ This does **not** guarantee correctness on every run; it **reduces** the rate of
 - Larger or more capable **local** or **hosted** LLMs when hardware or API budget allows.
 
 ---
+=======
+- `POST /api/upload` — upload a document for ingestion
+- `POST /api/chat` — submit a query and receive a streamed response
+- `GET /api/status` — inspect pipeline status and indexed documents
+- `GET /api/history` — list recent conversations
+>>>>>>> 7c76c39 (Implement grounded multi-format RAG pipeline with documentation)
 
 ## Project structure
 
 ```text
 Intern_Assignment/
-├── backend/
-│   └── app/
-│       ├── api/           # REST routes (chat, upload, history, status)
-│       ├── storage/       # Conversation / SQLite persistence
-│       └── main.py        # FastAPI app + CORS
-├── frontend/
-│   ├── src/
-│   │   └── app/           # Next.js App Router (page UI)
-│   ├── public/
-│   ├── package.json
-│   └── .env.local.example
-├── src/                   # Core RAG library
-│   ├── ingestion/         # Loaders, chunking
-│   ├── embeddings/        # Embedding model wrapper
-│   ├── vectordb/          # Chroma integration
-│   ├── retrieval/         # Hybrid search, reranking, sentence evidence
-│   ├── llm/               # Prompts, clients, grounding helpers
-│   └── pipeline.py        # Orchestration
-├── tests/                 # pytest suite (retrieval, grounding, hybrid, etc.)
-├── data/
-│   ├── raw/               # Sample / local documents (see data/raw/README.md)
-│   └── vectorstore/       # Chroma persistence (generated)
+├── backend/              # FastAPI application and storage layer
+├── frontend/             # Next.js frontend UI
+├── src/                  # Core RAG pipeline implementation
+│   ├── ingestion/        # document loaders and chunking
+│   ├── embeddings/       # embedding wrapper
+│   ├── vectordb/         # Chroma vector store integration
+│   ├── retrieval/        # search and rerank logic
+│   └── llm/              # prompts, grounding, and LLM client
+├── tests/                # unit and pipeline tests
+├── data/                 # raw documents and Chroma persistence
+├── docs/                 # technical documentation
+├── run_server.py         # backend entrypoint
 ├── requirements.txt
-├── run_server.py          # Uvicorn entrypoint
-├── .env.example
 └── README.md
 ```
 
----
+## Notes
 
-## Demo
-
-| Asset | Link / note |
-|--------|----------------|
-| **Demo video** | *[Add link to screen recording or Loom]* |
-| **Screenshots** | *[Add images or link to folder]* |
-
----
-
-## License
-
-If this repository is private coursework, clarify license with your instructor. Otherwise add a `LICENSE` file as required.
-
----
-
-*Internship / coursework submission — engineering-focused RAG stack with grounded document Q&A.*
+This documentation is intended for internship-quality technical evaluation. It focuses on system design, implementation, retrieval flow, and grounded response behavior without marketing language.

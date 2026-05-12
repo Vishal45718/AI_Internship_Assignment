@@ -24,7 +24,20 @@ interface Conversation {
 type ApiConnectionState = "idle" | "connecting" | "retrying" | "ready" | "unavailable";
 
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
-const API_TIMEOUT_MS = 12000;
+const API_TIMEOUT_MS = 15000; // Increased from 12000ms for general requests
+const CHAT_TIMEOUT_MS = 60000; // 60 seconds for chat requests
+
+// Process evidence tags like [E1|P1] into user-friendly citations
+const processEvidenceTags = (content: string, sources: any[] = []): string => {
+  return content.replace(/\[E(\d+)\|P(\d+)\]/g, (match, evidenceIndex, page) => {
+    const index = parseInt(evidenceIndex) - 1; // E1 = index 0
+    const source = sources[index];
+    if (source) {
+      return `Source: ${source.file} — Page ${page}`;
+    }
+    return match; // Fallback to original if source not found
+  });
+};
 
 export default function Home() {
   const [mode, setMode] = useState<Mode>("general");
@@ -67,7 +80,7 @@ export default function Home() {
 
   const checkBackendAvailability = async (attempts: number = 3, retryDelayMs: number = 700) => {
     setApiConnectionState("connecting");
-    setApiStatusMessage("Connecting to API...");
+    setApiStatusMessage("Connecting to backend...");
     for (let i = 1; i <= attempts; i++) {
       try {
         const res = await withTimeoutFetch(`${API_BASE_URL}/`, { method: "GET" }, 3000);
@@ -79,7 +92,7 @@ export default function Home() {
         console.warn(`[API] health-check attempt ${i}/${attempts} failed`, error);
         if (i < attempts) {
           setApiConnectionState("retrying");
-          setApiStatusMessage(`Retrying... (${i}/${attempts - 1})`);
+          setApiStatusMessage(`Connecting to backend... (${i}/${attempts})`);
           await sleep(retryDelayMs);
           continue;
         }
@@ -122,7 +135,7 @@ export default function Home() {
   };
 
   const bootstrapInitialData = async () => {
-    const ok = await checkBackendAvailability(4, 800);
+    const ok = await checkBackendAvailability(2, 800);
     if (!ok) return;
     await Promise.all([fetchHistory(), fetchFiles()]);
   };
@@ -161,9 +174,9 @@ export default function Home() {
         if (m.role === "assistant") {
           try {
             const parsed = JSON.parse(m.content);
-            return { role: m.role, content: parsed.text || parsed.content, sources: parsed.sources };
+            return { role: m.role, content: processEvidenceTags(parsed.text || parsed.content, parsed.sources), sources: parsed.sources };
           } catch {
-            return { role: m.role, content: m.content };
+            return { role: m.role, content: processEvidenceTags(m.content), sources: m.sources };
           }
         }
         return m;
@@ -189,13 +202,21 @@ export default function Home() {
     formData.append("file", file);
     
     setIsUploading(true);
-    setUploadStatus("Uploading & Indexing...");
-    
+    const uploadStages = ["Parsing file...", "Generating embeddings...", "Storing vectors..."];
+    setUploadStatus(uploadStages[0]);
+    let stageIndex = 0;
+    const stageTimer = window.setInterval(() => {
+      stageIndex += 1;
+      if (stageIndex < uploadStages.length) {
+        setUploadStatus(uploadStages[stageIndex]);
+      }
+    }, 5000);
+
     try {
       const res = await withTimeoutFetch(`${API_BASE_URL}/api/upload`, {
         method: "POST",
         body: formData,
-      });
+      }, 120000);
       const data = await res.json();
       if (res.ok) {
         setUploadStatus(`Success: ${data.chunks} chunks indexed.`);
@@ -205,11 +226,16 @@ export default function Home() {
         setUploadStatus(`Error: ${data.detail}`);
       }
     } catch (e) {
-      console.error("[API] upload failure", e);
-      setUploadStatus("Failed to upload file.");
-      setApiConnectionState("unavailable");
-      setApiStatusMessage("Backend unavailable");
+      if (e instanceof Error && e.name === "AbortError") {
+        setUploadStatus("Upload timed out after 2 minutes. Backend may still be processing.");
+      } else {
+        console.error("[API] upload failure", e);
+        setUploadStatus("Failed to upload file.");
+        setApiConnectionState("unavailable");
+        setApiStatusMessage("Backend unavailable");
+      }
     } finally {
+      window.clearInterval(stageTimer);
       setIsUploading(false);
       setTimeout(() => setUploadStatus(null), 5000);
     }
@@ -225,6 +251,7 @@ export default function Home() {
     const newMessages = [...messages, { role: "user" as const, content: userMessage }];
     setMessages(newMessages);
     setIsStreaming(true);
+    setApiStatusMessage("Generating response...");
 
     try {
       const convId = activeConvId || crypto.randomUUID();
@@ -238,7 +265,7 @@ export default function Home() {
           mode,
           conversation_id: convId,
         }),
-      });
+      }, CHAT_TIMEOUT_MS);
 
       if (!res.body) throw new Error("No response body");
 
@@ -275,7 +302,7 @@ export default function Home() {
               
               setMessages([
                 ...newMessages,
-                { role: "assistant", content: assistantMsg, sources }
+                { role: "assistant", content: processEvidenceTags(assistantMsg, sources), sources }
               ]);
             } catch (e) {
               // Ignore incomplete JSON parses in stream
@@ -285,14 +312,23 @@ export default function Home() {
       }
     } catch (error) {
       console.error("Chat error:", error);
-      setMessages([
-        ...newMessages,
-        { role: "assistant", content: "Backend unavailable. Please retry in a few seconds." },
-      ]);
-      setApiConnectionState("unavailable");
-      setApiStatusMessage("Backend unavailable");
+      if (error instanceof Error && error.name === 'AbortError') {
+        setMessages([
+          ...newMessages,
+          { role: "assistant", content: "Backend is still processing your request. Please wait..." },
+        ]);
+        setApiStatusMessage("Backend is still processing...");
+      } else {
+        setMessages([
+          ...newMessages,
+          { role: "assistant", content: "Backend unavailable. Please retry in a few seconds." },
+        ]);
+        setApiConnectionState("unavailable");
+        setApiStatusMessage("Backend unavailable");
+      }
     } finally {
       setIsStreaming(false);
+      setApiStatusMessage(null);
     }
   };
 

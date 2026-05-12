@@ -119,8 +119,9 @@ def _load_markdown(path: Path) -> list[Document]:
 
 def _load_csv(path: Path) -> list[Document]:
     """
-    Load a CSV file, converting rows to prose sentences.
-    Batches 20 rows per Document for reasonable chunk sizes.
+    Load a CSV file, converting each row to a compact structured document.
+    Each CSV row becomes its own Document so rows are not recursively chunked
+    like long text files or PDFs.
     """
     documents: list[Document] = []
     try:
@@ -132,26 +133,21 @@ def _load_csv(path: Path) -> list[Document]:
             logger.warning("CSV file '%s' has no data rows.", path.name)
             return []
 
-        # Group rows into batches of 20 for reasonable document size
-        ROWS_PER_DOC = 20
-        for batch_start in range(0, len(rows), ROWS_PER_DOC):
-            batch = rows[batch_start : batch_start + ROWS_PER_DOC]
-            prose_lines = [csv_row_to_prose(row) for row in batch]
-            content = "\n".join(prose_lines)
+        for row_index, row in enumerate(rows, start=1):
+            content = csv_row_to_prose(row)
             cleaned = clean_text(content)
             if not cleaned:
                 continue
             meta = _build_metadata(
                 path, DocumentType.CSV,
-                row_start=batch_start + 1,
-                row_end=batch_start + len(batch),
+                row_number=row_index,
             )
             documents.append(Document(content=cleaned, metadata=meta))
 
     except Exception as exc:
         raise LoaderError(f"Failed to load CSV '{path}': {exc}") from exc
 
-    logger.info("Loaded CSV: %s (%d batch documents)", path.name, len(documents))
+    logger.info("Loaded CSV: %s (%d rows)", path.name, len(documents))
     return documents
 
 

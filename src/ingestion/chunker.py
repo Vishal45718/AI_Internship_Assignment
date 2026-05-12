@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from src.models import Document, DocumentChunk, ChunkMetadata
+from src.models import Document, DocumentChunk, ChunkMetadata, DocumentType
 from src.utils.hashing import make_chunk_id
 from src.config import get_settings
 
@@ -128,6 +128,34 @@ class DocumentChunker:
         if not document.content.strip():
             logger.warning("Skipping empty document: %s", document.metadata.source_file)
             return []
+
+        if document.metadata.source_type == DocumentType.CSV:
+            text = document.content.strip()
+            if not text:
+                logger.warning("Skipping empty CSV row: %s", document.metadata.source_file)
+                return []
+
+            ingestion_ts = datetime.now(timezone.utc).isoformat()
+            row_number = document.metadata.extra.get("row_number")
+            section_title = f"Row {row_number}" if row_number else "CSV row"
+            chunk_id = make_chunk_id(document.metadata.source_file, 0, text)
+            meta = ChunkMetadata(
+                chunk_id=chunk_id,
+                source_file=document.metadata.source_file,
+                source_type=document.metadata.source_type.value,
+                file_path=document.metadata.file_path,
+                page_number=document.metadata.extra.get("page_number"),
+                chunk_index=0,
+                char_count=len(text),
+                ingestion_timestamp=ingestion_ts,
+                parent_id=document.id,
+                document_name=document.metadata.source_file,
+                section_title=section_title,
+                subsection_title="",
+                heading_path=section_title,
+                section_index=0,
+            )
+            return [DocumentChunk(content=text, metadata=meta)]
 
         section_blocks = self._sectionize_document(document.content)
         raw_chunks: list[tuple[str, dict[str, str | int]]] = []
