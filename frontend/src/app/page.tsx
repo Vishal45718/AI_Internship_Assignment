@@ -21,6 +21,11 @@ interface Conversation {
   updated_at: string;
 }
 
+type ApiConnectionState = "idle" | "connecting" | "retrying" | "ready" | "unavailable";
+
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+const API_TIMEOUT_MS = 12000;
+
 export default function Home() {
   const [mode, setMode] = useState<Mode>("general");
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -32,12 +37,14 @@ export default function Home() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [apiConnectionState, setApiConnectionState] = useState<ApiConnectionState>("idle");
+  const [apiStatusMessage, setApiStatusMessage] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Fetch history on load
   useEffect(() => {
-    fetchHistory();
-    fetchFiles();
+    console.info("[API] base URL:", API_BASE_URL);
+    void bootstrapInitialData();
   }, []);
 
   // Scroll to bottom
@@ -45,32 +52,108 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const withTimeoutFetch = async (url: string, init?: RequestInit, timeoutMs: number = API_TIMEOUT_MS) => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      console.info("[API] request:", url);
+      return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+      window.clearTimeout(timer);
+    }
+  };
+
+  const checkBackendAvailability = async (attempts: number = 3, retryDelayMs: number = 700) => {
+    setApiConnectionState("connecting");
+    setApiStatusMessage("Connecting to API...");
+    for (let i = 1; i <= attempts; i++) {
+      try {
+        const res = await withTimeoutFetch(`${API_BASE_URL}/`, { method: "GET" }, 3000);
+        if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
+        setApiConnectionState("ready");
+        setApiStatusMessage(null);
+        return true;
+      } catch (error) {
+        console.warn(`[API] health-check attempt ${i}/${attempts} failed`, error);
+        if (i < attempts) {
+          setApiConnectionState("retrying");
+          setApiStatusMessage(`Retrying... (${i}/${attempts - 1})`);
+          await sleep(retryDelayMs);
+          continue;
+        }
+      }
+    }
+    setApiConnectionState("unavailable");
+    setApiStatusMessage("Backend unavailable");
+    return false;
+  };
+
+  const apiFetchJson = async (
+    path: string,
+    init?: RequestInit,
+    opts?: { timeoutMs?: number; retryOnNetworkFail?: number }
+  ) => {
+    const timeoutMs = opts?.timeoutMs ?? API_TIMEOUT_MS;
+    const retryOnNetworkFail = opts?.retryOnNetworkFail ?? 1;
+    const target = `${API_BASE_URL}${path}`;
+    let attempt = 0;
+
+    while (attempt <= retryOnNetworkFail) {
+      try {
+        const res = await withTimeoutFetch(target, init, timeoutMs);
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`HTTP ${res.status}: ${text || "Request failed"}`);
+        }
+        setApiConnectionState("ready");
+        setApiStatusMessage(null);
+        return await res.json();
+      } catch (error) {
+        attempt += 1;
+        console.error(`[API] fetch failure (attempt ${attempt}) -> ${target}`, error);
+        if (attempt > retryOnNetworkFail) throw error;
+        const isReachable = await checkBackendAvailability(2, 600);
+        if (!isReachable) throw error;
+      }
+    }
+    throw new Error("Unexpected API fetch failure");
+  };
+
+  const bootstrapInitialData = async () => {
+    const ok = await checkBackendAvailability(4, 800);
+    if (!ok) return;
+    await Promise.all([fetchHistory(), fetchFiles()]);
+  };
+
   const fetchFiles = async () => {
     try {
-      const res = await fetch(`http://${window.location.hostname}:8000/api/status`);
-      const data = await res.json();
+      const data = await apiFetchJson("/api/status", undefined, { retryOnNetworkFail: 1 });
       if (data && data.documents) {
         setAvailableFiles(data.documents);
       }
     } catch (e) {
       console.error("Failed to fetch files", e);
+      setApiConnectionState("unavailable");
+      setApiStatusMessage("Backend unavailable");
     }
   };
 
   const fetchHistory = async () => {
     try {
-      const res = await fetch(`http://${window.location.hostname}:8000/api/history`);
-      const data = await res.json();
+      const data = await apiFetchJson("/api/history", undefined, { retryOnNetworkFail: 1 });
       setConversations(data);
     } catch (e) {
       console.error("Failed to fetch history", e);
+      setApiConnectionState("unavailable");
+      setApiStatusMessage("Backend unavailable");
     }
   };
 
   const loadConversation = async (id: string) => {
     try {
-      const res = await fetch(`http://${window.location.hostname}:8000/api/conversations/${id}`);
-      const data = await res.json();
+      const data = await apiFetchJson(`/api/conversations/${id}`);
       setActiveConvId(data.id);
       setMode(data.mode);
       
@@ -88,6 +171,8 @@ export default function Home() {
       setMessages(parsedMessages);
     } catch (e) {
       console.error("Failed to load conversation", e);
+      setApiConnectionState("unavailable");
+      setApiStatusMessage("Backend unavailable");
     }
   };
 
@@ -107,7 +192,7 @@ export default function Home() {
     setUploadStatus("Uploading & Indexing...");
     
     try {
-      const res = await fetch(`http://${window.location.hostname}:8000/api/upload`, {
+      const res = await withTimeoutFetch(`${API_BASE_URL}/api/upload`, {
         method: "POST",
         body: formData,
       });
@@ -120,7 +205,10 @@ export default function Home() {
         setUploadStatus(`Error: ${data.detail}`);
       }
     } catch (e) {
+      console.error("[API] upload failure", e);
       setUploadStatus("Failed to upload file.");
+      setApiConnectionState("unavailable");
+      setApiStatusMessage("Backend unavailable");
     } finally {
       setIsUploading(false);
       setTimeout(() => setUploadStatus(null), 5000);
@@ -142,7 +230,7 @@ export default function Home() {
       const convId = activeConvId || crypto.randomUUID();
       if (!activeConvId) setActiveConvId(convId);
 
-      const res = await fetch(`http://${window.location.hostname}:8000/api/chat`, {
+      const res = await withTimeoutFetch(`${API_BASE_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -197,6 +285,12 @@ export default function Home() {
       }
     } catch (error) {
       console.error("Chat error:", error);
+      setMessages([
+        ...newMessages,
+        { role: "assistant", content: "Backend unavailable. Please retry in a few seconds." },
+      ]);
+      setApiConnectionState("unavailable");
+      setApiStatusMessage("Backend unavailable");
     } finally {
       setIsStreaming(false);
     }
@@ -295,6 +389,19 @@ export default function Home() {
 
         {/* Chat Area */}
         <div className="flex-1 overflow-y-auto p-4 md:p-8">
+          {apiStatusMessage && (
+            <div className="max-w-3xl mx-auto mb-4">
+              <div
+                className={`rounded-md border px-3 py-2 text-sm ${
+                  apiConnectionState === "retrying" || apiConnectionState === "connecting"
+                    ? "border-amber-700/60 bg-amber-900/20 text-amber-300"
+                    : "border-red-700/60 bg-red-900/20 text-red-300"
+                }`}
+              >
+                {apiStatusMessage}
+              </div>
+            </div>
+          )}
           <div className="max-w-3xl mx-auto flex flex-col gap-8 pb-32">
             {messages.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full mt-32 text-center text-gray-400">
