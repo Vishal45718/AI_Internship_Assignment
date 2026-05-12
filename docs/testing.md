@@ -1,78 +1,71 @@
-# Testing and Evaluation
+# Testing
 
-## Testing strategy
+## Test objectives
 
-This project uses focused module-level tests to verify retrieval, grounding, and ingestion behavior. The test suite is designed to validate both component behavior and RAG quality properties.
+- verify file ingestion across supported formats
+- confirm chunk counts and metadata behavior
+- validate semantic retrieval and reranking
+- ensure grounding and fallback logic behave as expected
+- check frontend timeout and upload progress handling
 
-### Test coverage areas
-
-- **Ingestion**: file loading and CSV row handling
-- **Chunking**: proper chunk counts and section handling
-- **Retrieval**: semantic matching and hybrid search behavior
-- **Grounding**: evidence blocks and fallback responses
-- **Pipeline flow**: integration of retrieval, prompt construction, and model generation logic
-
-## Relevant test files
+## Test files
 
 - `tests/test_parent_retrieval.py`
 - `tests/test_hybrid_retrieval.py`
 - `tests/test_strict_retrieval_pipeline.py`
 - `tests/test_grounding.py`
 
-## Example evaluation scenarios
+## Focus areas
 
-### SeaKR and DRAGIN queries
+### Ingestion
 
-Test queries should verify that the system retrieves and cites relevant passages rather than relying on generic model output.
+- CSV rows are loaded as individual documents
+- Markdown formatting is cleaned before chunking
+- PDF page boundaries are preserved in metadata
 
-Examples:
-- “What retrieval conditions does SeaKR use?”
-- “How does DRAGIN reformulate the query for reranking?”
+### Chunking
 
-### Markdown syntax handling
+- text documents are split into overlapping semantic chunks
+- CSV documents produce compact row-level chunks
+- chunk IDs are stable across reingestion
 
-Verify that Markdown files are cleaned and embedded without formatting artifacts.
-- headings should be stripped
-- code blocks should not inject noise into embeddings
-- inline links should preserve visible text only
+### Retrieval
 
-### CSV structure queries
+- semantic matching retrieves relevant passages
+- hybrid retrieval combines dense and keyword signals
+- reranking improves passage selection
 
-Confirm that CSV rows are treated as compact documents rather than recursively chunked.
-- 50 rows should produce roughly 50–100 chunks, not thousands
-- row-level metadata should be preserved
-- queries should return row-level evidence from CSV content
+### Grounded output
 
-## Grounded-answer verification
+- evidence blocks are included in prompts
+- fallback responses appear when evidence is weak
+- unsupported details are reduced by validation checks
 
-- verify that citations are attached to answers when applicable
-- ensure fallback text appears when retrieval confidence is too low
-- confirm that the system does not return unsupported technical detail without evidence
+## Example scenarios
 
-## Runtime / integration checks
+- retrieving specific terms from acronym-heavy documents
+- verifying CSV row answer accuracy
+- confirming Markdown content is embedded cleanly
+- checking that uploads do not abort prematurely
 
-- upload large CSV files and verify no premature frontend aborts
-- confirm upload progress messages appear during ingestion
-- validate chat timeouts are long enough for Ollama inference and retrieval
+## Manual evaluation
 
-## Manual evaluation notes
+Validate the system with realistic documents and queries that exercise:
 
-The system should be evaluated with representative document sets, including:
-- research papers with acronym-heavy content
+- research papers with acronyms and method names
 - CSV datasets with structured rows
-- Markdown notes and technical documentation
-- plain text research summaries
+- Markdown notes and formatted text
+- plain text technical summaries
 
-Manual checks should focus on:
-- correct passage retrieval
-- source citation accuracy
-- conservative behavior when evidence is weak
-- response fluency within model limitations
+## Limitations in evaluation
 
-## Limitations in tests
+- local Ollama behavior depends on model size and hardware
+- PDF extraction varies by source quality
+- retrieval precision is the primary determinant of answer usefulness
 
-- local Ollama inference may vary by model and hardware
-- PDF extraction quality depends on the source document
-- retrieval precision is a major factor in end-to-end answer quality
+## Recommended verification
 
-For a stronger assessment, combine unit tests with real-document manual queries and inspect actual retrieved chunks.
+- compare generated answers against retrieved chunk sources
+- inspect `ChromaDB` metadata for correct source attribution
+- run ingestion for all supported formats and verify chunk counts
+- exercise the chat UI with document mode and review source citations

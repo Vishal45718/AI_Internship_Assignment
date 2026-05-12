@@ -1,49 +1,50 @@
-# Agentic RAG — Document Q&A with Grounded Answers
+# Grounded Multi-Format RAG System
 
-This repository implements a grounded Retrieval-Augmented Generation (RAG) system for question answering over uploaded documents. It combines a React/Next.js frontend, FastAPI backend, local embeddings, a Chroma vector store, and Ollama-based local inference.
+A technical Retrieval-Augmented Generation (RAG) system for question answering over uploaded documents. The project integrates multi-format ingestion, semantic retrieval, reranking, and local Ollama inference to produce evidence-aware answers.
 
-## What this project does
+## Project Overview
 
-- Ingests PDF, TXT, CSV, and Markdown files
-- Converts documents into searchable chunks with provenance metadata
-- Embeds chunks using SentenceTransformers
-- Stores vectors in ChromaDB
-- Retrieves and reranks candidate passages for each query
-- Generates answer text with a local Ollama LLM
-- Surfaces evidence-backed responses and conservative fallbacks when support is weak
+This system ingests PDF, TXT, CSV, and Markdown documents, converts them into searchable chunks, stores embeddings in ChromaDB, and retrieves evidence for grounded responses. It is optimized for document-centered QA where source provenance and conservative answers are more important than open-ended chat.
 
-## Why RAG matters
+## Features
 
-RAG is useful for document QA because it grounds answers in uploaded source material rather than relying solely on pretrained model knowledge. This is especially important for research papers, technical notes, and structured data where specific names, thresholds, and details must be drawn from the actual corpus.
+| Feature | Description |
+|---|---|
+| Multi-format ingestion | PDF, TXT, CSV, Markdown with format-specific loaders |
+| Grounded retrieval | semantic search over embedded chunks |
+| Reranking | candidate passages rescored for relevance |
+| Local inference | Ollama-based generation without external APIs |
+| Evidence-aware responses | prompts and validation emphasize cited text |
+| Frontend UI | upload, chat, streaming SSE, source display |
 
-## Supported formats
+## Architecture
 
-- PDF
-- TXT
-- CSV
-- Markdown
+```text
+Upload → Parsing → Chunking → Embeddings → ChromaDB → Retrieval → Reranking → Prompt Construction → Ollama → Grounded Response
+```
 
-CSV support is implemented as row-level ingestion rather than recursive chunking, which keeps chunk counts compact and avoids excessive vector generation.
+- **Upload**: frontend sends files to FastAPI upload endpoint
+- **Parsing**: format-specific document loaders extract text
+- **Chunking**: text is split into retrieval-friendly chunks
+- **Embeddings**: chunks are vectorized with SentenceTransformers
+- **ChromaDB**: vectors and metadata are persisted for search
+- **Retrieval**: query vectors retrieve candidate chunks
+- **Reranking**: candidates are rescored to improve precision
+- **Prompt construction**: evidence blocks are assembled
+- **Ollama**: local LLM generates answers from retrieved context
 
-## Local inference with Ollama
+## Tech Stack
 
-The pipeline uses Ollama for local LLM inference to support offline or private deployments. Local inference reduces dependency on third-party APIs and keeps cost predictable, while the system design balances that with retrieval quality and grounded prompting.
+- **Backend**: Python, FastAPI
+- **Frontend**: Next.js, React, TypeScript
+- **Embedding**: SentenceTransformers
+- **Vector store**: ChromaDB
+- **Local LLM**: Ollama
+- **Persistence**: SQLite via SQLAlchemy
 
-## Documentation
+## Setup Instructions
 
-- `docs/system_design.md` — design goals, component responsibilities, and engineering decisions
-- `docs/architecture.md` — architecture flow, retrieval pipeline, grounding strategy, and diagrams
-- `docs/testing.md` — testing approach, evaluation scenarios, and limitations
-
-## Quick setup
-
-### Prerequisites
-
-- Python 3.11+
-- Node.js 18+
-- Ollama installed and running
-
-### Python setup
+### 1. Environment
 
 ```bash
 python -m venv .venv
@@ -51,27 +52,28 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Ollama model
+### 2. Ollama model
 
 ```bash
 ollama pull phi3:mini
 ```
 
-### Backend environment
+### 3. Backend configuration
 
 ```bash
 cp .env.example .env
 ```
 
-Set at minimum:
+Set required values:
 
 ```env
 LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=phi3:mini
 ```
+Local inference through Ollama was used to reduce external API dependency, support offline execution, and provide a cost-efficient deployment pipeline for experimentation and testing.
 
-### Frontend setup
+### 4. Frontend configuration
 
 ```bash
 cd frontend
@@ -79,45 +81,38 @@ npm install
 cp .env.local.example .env.local
 ```
 
-Configure:
+Set:
 
 ```env
 NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-### Run the app
+### 5. Run services
 
-Start the backend:
+**Backend**:
 
 ```bash
 source .venv/bin/activate
 python run_server.py --reload
 ```
 
-Start the frontend:
+**Frontend**:
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Open the UI at `http://localhost:3000`.
-
-## API routes
-
-<<<<<<< HEAD
 ## Example Queries
 
-After uploading one or more documents, try queries such as:
-
-### Research PDF
-- “What is Test-time Corpus Feedback in RAG systems?”
-- “How does the paper categorize feedback mechanisms in Retrieval-Augmented Generation?”
+### Research PDFs
 - “What challenges in Retrieval-Augmented Generation are discussed in the paper?”
+- “How does the paper categorize retrieval feedback mechanisms?”
+- “What limitations of retrieval strategies are mentioned?”
 
 ### Markdown Documents
 - “How are blockquotes represented in Markdown?”
-- “What are the two styles of headers supported in Markdown?”
+- “What are the two styles of Markdown headers?”
 
 ### CSV Files
 - “What columns are present in the dataset?”
@@ -127,66 +122,51 @@ After uploading one or more documents, try queries such as:
 - “Summarize the uploaded text file.”
 - “What repeating patterns are present in the text?”
 
-The system is designed to generate grounded responses strictly from retrieved evidence. If sufficient supporting context is unavailable, the model responds cautiously instead of generating unsupported claims.
+## Hallucination Prevention
 
----
+- **Evidence-first prompts** force the model to rely on retrieved chunks.
+- **Fallback responses** are returned when retrieval confidence is low.
+- **Post-generation validation** checks output against evidence overlap.
+- **Reranking** improves passage precision before generation.
 
-## Hallucination prevention (design)
+## Challenges Faced
 
-- **Grounded answering** — User and system prompts require using retrieved evidence, not general world knowledge, for paper-specific entities.  
-- **Evidence-based generation** — Retrieved chunks/sentences are injected into the prompt so the model conditions on citeable text.  
-- **Cautious fallback responses** — When retrieval is weak or evidence does not support the question, the pipeline can abstain or give short, honest limitations instead of fabricating facts.  
-- **Rejection of unsupported claims** — Post-generation checks flag unsupported terms, risky expansions, and low overlap with evidence; outputs may be regenerated, pruned, or replaced with a safe response.
-
-This does **not** guarantee correctness on every run; it **reduces** the rate of unsupported statements compared to a plain chat model.
-
----
+- balancing chunk size and overlap for PDFs and text
+- preventing CSV row explosion during ingestion
+- managing frontend timeouts for long-running uploads and inference
+- preserving grounding while using a lightweight local LLM
 
 ## Limitations
 
-- **Acronym-heavy papers** — Models may still confuse similar methods; strict grounding depends on retrieval finding the right spans.  
-- **Retrieval precision** — Wrong or partial matches still lead to incomplete or misleading answers.  
-- **OCR / tables** — PDF text extraction may miss layout, tables, or figures; answers are only as good as the extracted text.  
-- **Small local models** — `phi3:mini` and similar models may miss nuanced reasoning or long-range dependencies even when retrieval is good.
+- local Ollama models have constrained reasoning capacity
+- PDF extraction quality depends on the source document
+- tables and scanned content are not explicitly handled
+- retrieval precision remains a main driver of answer quality
 
----
+## Future Improvements
 
-## Future improvements
+- stronger reranking models and hybrid fusion
+- conversational memory for follow-up questions
+- table-aware document processing
+- larger local or hosted LLM integration
+- improved CSV/table semantic parsing
 
-- Stronger **reranking** and fusion strategies (learned rerankers, ColBERT-style retrieval).  
-- **Multimodal** retrieval (figures, slides) where applicable.  
-- **Conversational memory** with clear separation between “chat” and “evidence-backed” turns.  
-- More **agentic** workflows (e.g. query decomposition, multi-step retrieval) with guardrails.  
-- Larger or more capable **local** or **hosted** LLMs when hardware or API budget allows.
+## API Endpoints
 
----
-=======
-- `POST /api/upload` — upload a document for ingestion
-- `POST /api/chat` — submit a query and receive a streamed response
-- `GET /api/status` — inspect pipeline status and indexed documents
-- `GET /api/history` — list recent conversations
->>>>>>> 7c76c39 (Implement grounded multi-format RAG pipeline with documentation)
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/upload` | POST | upload documents for ingestion |
+| `/api/chat` | POST | send queries and stream responses |
+| `/api/status` | GET | inspect indexed documents and pipeline status |
+| `/api/history` | GET | list recent conversations |
 
-## Project structure
+## Testing
 
-```text
-Intern_Assignment/
-├── backend/              # FastAPI application and storage layer
-├── frontend/             # Next.js frontend UI
-├── src/                  # Core RAG pipeline implementation
-│   ├── ingestion/        # document loaders and chunking
-│   ├── embeddings/       # embedding wrapper
-│   ├── vectordb/         # Chroma vector store integration
-│   ├── retrieval/        # search and rerank logic
-│   └── llm/              # prompts, grounding, and LLM client
-├── tests/                # unit and pipeline tests
-├── data/                 # raw documents and Chroma persistence
-├── docs/                 # technical documentation
-├── run_server.py         # backend entrypoint
-├── requirements.txt
-└── README.md
-```
+- unit tests validate ingestion, retrieval, grounding, and hybrid behavior
+- CSV row ingestion is verified for compact chunk counts
+- retrieval tests cover semantic and hybrid search patterns
+- grounding tests confirm fallback and evidence-aware output
 
-## Notes
+## Conclusion
 
-This documentation is intended for internship-quality technical evaluation. It focuses on system design, implementation, retrieval flow, and grounded response behavior without marketing language.
+This project demonstrates a grounded RAG pipeline with multi-format ingestion, semantic retrieval, reranking, and local LLM inference through Ollama. The system emphasizes evidence-aware answering, retrieval quality, and practical engineering tradeoffs for document-based question answering workflows.
