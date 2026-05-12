@@ -47,9 +47,10 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
     db.add(user_msg)
     db.commit()
 
-    # Retrieve history
+    # Retrieve bounded history (last 1 user + last 1 assistant only).
     db_messages = db.query(Message).filter(Message.conversation_id == conv_id).order_by(Message.id).all()
-    history = [{"role": msg.role, "content": msg.content} for msg in db_messages[:-1]] # Exclude the current message
+    prior_turns = [{"role": msg.role, "content": msg.content} for msg in db_messages[:-1]]
+    history = [m for m in prior_turns if m["role"] in {"user", "assistant"}][-2:]
 
     def event_stream():
         full_response = ""
