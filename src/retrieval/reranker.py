@@ -27,12 +27,12 @@ class CrossEncoderReranker:
         ]
         for name in candidates:
             try:
-                self._model = CrossEncoder(name, max_length=512)
+                self._model = CrossEncoder(name, max_length=512, local_files_only=True)
                 self.model_name = name
                 logger.info("Loaded reranker model: %s", name)
                 return
             except Exception as exc:
-                logger.warning("Failed loading reranker %s: %s", name, exc)
+                logger.warning("Failed loading reranker %s locally: %s", name, exc)
 
     def score(self, query: str, passages: Iterable[str]) -> list[float]:
         texts = list(passages)
