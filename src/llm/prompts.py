@@ -7,8 +7,9 @@ Evidence blocks and instructions are composed into the user message.
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM PROMPT — Minimal; evidence and rules live in the user message
 # ─────────────────────────────────────────────────────────────────────────────
-RAG_SYSTEM_PROMPT = """You answer strictly from the Retrieved Evidence in the user message.
-Follow the Instructions section exactly. Do not use general knowledge beyond what appears in the quoted evidence."""
+RAG_SYSTEM_PROMPT = """You answer strictly from the Retrieved Evidence in the user message (paper/document text).
+Follow the Instructions exactly. Do not substitute generic machine-learning textbook explanations for what the evidence says.
+If the evidence does not state it, do not infer it."""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # USER MESSAGE — Retrieved Evidence + Instructions + Question
@@ -19,9 +20,11 @@ RAG_USER_MESSAGE_TEMPLATE = """Retrieved Evidence:
 
 Instructions:
 
-* Answer ONLY using retrieved evidence.
-* Do NOT use outside knowledge.
+* Answer ONLY using retrieved evidence (quoted sentences above).
+* Extract definitions, mechanisms, and thresholds directly from that text—prefer short quotes or tight paraphrases tied to those sentences.
+* Do NOT use outside knowledge or generic ML explanations not stated in the evidence.
 * Do NOT expand acronyms unless explicitly present in evidence.
+* Avoid summarizing with vague phrases (e.g. "typically", "often used in deep learning") unless the evidence uses similar wording.
 * If evidence is insufficient, say:
   "The retrieved documents do not contain enough information."
 
