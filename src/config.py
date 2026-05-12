@@ -60,10 +60,10 @@ class Settings(BaseSettings):
 
     # ── LLM generation (output token cap; keeps OpenRouter costs predictable) ──
     llm_max_output_tokens: int = Field(
-        default=48,
+        default=32,
         ge=32,
         le=128,
-        description="Max completion tokens per request (aggressive cap for OpenRouter free tier / 402 avoidance).",
+        description="Max completion tokens per request (ultra-aggressive cap for OpenRouter free tier / 402 avoidance).",
     )
 
     @field_validator("openrouter_model", mode="before")
@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     retrieval_top_k: int = Field(default=20, ge=1, le=100)
     rerank_top_k: int = Field(default=5, ge=1, le=30)
     final_context_chunks: int = Field(default=2, ge=1, le=30, description="Chunks passed into sentence packing after retrieval.")
-    max_context_tokens: int = Field(default=600, ge=200, le=12000, description="Estimated-token budget for system+user (+history) prompt.")
+    max_context_tokens: int = Field(default=300, ge=120, le=12000, description="Estimated-token budget for system+user (+history) prompt.")
     retrieval_score_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     rerank_score_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
     similarity_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
@@ -119,7 +119,7 @@ class Settings(BaseSettings):
 
     # ── Context Expansion ────────────────────────────────────────────────────
     parent_context_enabled: bool = Field(
-        default=True,
+        default=False,
         description="Enable Parent Document Retrieval (Small-to-Big Retrieval).",
     )
     parent_window_before: int = Field(default=1, ge=0)
