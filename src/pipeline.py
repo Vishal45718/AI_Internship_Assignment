@@ -20,6 +20,12 @@ from src.ingestion.chunker import DocumentChunker
 from src.embeddings.embedder import create_embedder
 from src.vectordb.store import ChromaVectorStore
 from src.retrieval.retriever import SemanticRetriever
+from src.retrieval.sentence_evidence import (
+    dedupe_sentences,
+    format_sentence_evidence_blocks,
+    pack_evidence_sentences,
+    score_sentences_for_query,
+)
 from src.llm.client import create_llm_client
 from src.llm.prompts import (
     RAG_SYSTEM_PROMPT,
@@ -200,12 +206,14 @@ class RAGPipeline:
                 "top_score": result.top_score,
             }
 
-        # Step 4: Enforce prompt token budget (trim lowest-ranked chunks first)
-        chunks_for_llm = self._trim_chunks_for_prompt_budget(result.chunks, question, history)
-        evidence_blocks = self._format_context(chunks_for_llm)
-        corpus_plain = build_retrieval_corpus(chunks_for_llm)
+        # Step 4: Enforce prompt token budget (trim lowest-ranked chunks first), sentence-level evidence
+        chunks_for_llm, evidence_blocks, corpus_plain, sentence_meta = self._trim_chunks_for_prompt_budget(
+            result.chunks, question, history
+        )
         user_message = build_rag_user_message(evidence_blocks, question)
         system_prompt = RAG_SYSTEM_PROMPT
+
+        print(f"Sentence evidence: mode={sentence_meta.get('mode')} packed={sentence_meta.get('packed_count')} focus={sentence_meta.get('focus')}")
 
         allow_llm, block_reasons, pre_debug = assess_pre_generation_support(
             question,
@@ -222,6 +230,7 @@ class RAGPipeline:
                 post_validation=None,
                 triggers=grounding_triggers,
                 regeneration_attempts=0,
+                sentence_meta=sentence_meta,
             )
             return {
                 "answer": INSUFFICIENT_DOCUMENT_EVIDENCE,
@@ -290,6 +299,8 @@ class RAGPipeline:
                     "unsupported_terms": [],
                     "protected_violations": [],
                     "unsupported_ratio": 0.0,
+                    "evidence_overlap_ratio": 0.0,
+                    "evidence_overlap_missing": [],
                     "regenerate": False,
                     "is_insufficient_disclaimer": True,
                 }
@@ -305,6 +316,7 @@ class RAGPipeline:
             post_validation=post_val,
             triggers=grounding_triggers,
             regeneration_attempts=regeneration_attempts,
+            sentence_meta=sentence_meta,
         )
 
         return {
@@ -317,6 +329,7 @@ class RAGPipeline:
                 "post_generation": post_val,
                 "regenerated": regenerated,
                 "regeneration_attempts": regeneration_attempts,
+                "sentence_evidence": sentence_meta,
                 "triggers": grounding_triggers,
             },
         }
@@ -355,11 +368,16 @@ class RAGPipeline:
         print(f"[stream] Expanded chunk count: {result.expanded_chunk_count}")
         print(f"[stream] Final chunk count: {result.final_chunk_count}")
 
-        chunks_for_llm = self._trim_chunks_for_prompt_budget(result.chunks, question, history)
-        evidence_blocks = self._format_context(chunks_for_llm)
-        corpus_plain = build_retrieval_corpus(chunks_for_llm)
+        chunks_for_llm, evidence_blocks, corpus_plain, sentence_meta = self._trim_chunks_for_prompt_budget(
+            result.chunks, question, history
+        )
         user_message = build_rag_user_message(evidence_blocks, question)
         system_prompt = RAG_SYSTEM_PROMPT
+
+        print(
+            f"[stream] Sentence evidence: mode={sentence_meta.get('mode')} "
+            f"packed={sentence_meta.get('packed_count')} focus={sentence_meta.get('focus')}"
+        )
 
         allow_llm, block_reasons, pre_debug = assess_pre_generation_support(
             question,
@@ -376,6 +394,7 @@ class RAGPipeline:
                 post_validation=None,
                 triggers=grounding_triggers,
                 regeneration_attempts=0,
+                sentence_meta=sentence_meta,
                 prefix="[stream] ",
             )
             yield "sources", self._dedupe_sources(chunks_for_llm)
@@ -432,6 +451,8 @@ class RAGPipeline:
                     "unsupported_terms": [],
                     "protected_violations": [],
                     "unsupported_ratio": 0.0,
+                    "evidence_overlap_ratio": 0.0,
+                    "evidence_overlap_missing": [],
                     "regenerate": False,
                     "is_insufficient_disclaimer": True,
                 }
@@ -446,6 +467,7 @@ class RAGPipeline:
             post_validation=post_val,
             triggers=grounding_triggers,
             regeneration_attempts=regeneration_attempts,
+            sentence_meta=sentence_meta,
             prefix="[stream] ",
         )
 
@@ -461,6 +483,7 @@ class RAGPipeline:
         post_validation: dict[str, Any] | None,
         triggers: list[dict[str, Any]],
         regeneration_attempts: int,
+        sentence_meta: dict[str, Any] | None = None,
         prefix: str = "",
     ) -> None:
         evidence_summary = [
@@ -471,7 +494,15 @@ class RAGPipeline:
             }
             for c in sorted(chunks_for_llm, key=lambda x: (x.page_number or 0, x.chunk_index))
         ]
-        print(f"{prefix}[grounding] retrieved_evidence_used: {evidence_summary}")
+        print(f"{prefix}[grounding] retrieved_chunk_pool: {evidence_summary}")
+        if sentence_meta:
+            print(f"{prefix}[grounding] sentence_evidence_mode: {sentence_meta.get('mode')} focus={sentence_meta.get('focus')}")
+            sel = sentence_meta.get("selected") or []
+            print(f"{prefix}[grounding] selected_evidence_sentences ({len(sel)}): {sel}")
+            print(
+                f"{prefix}[grounding] definition_pattern_boost_hits: "
+                f"{sentence_meta.get('definition_pattern_hits')} sentence_count={sentence_meta.get('sentence_count')}"
+            )
         print(f"{prefix}[grounding] regeneration_attempts: {regeneration_attempts}")
         print(f"{prefix}[grounding] grounding_confidence: {grounding_confidence:.3f}")
         if post_validation is not None:
@@ -486,6 +517,10 @@ class RAGPipeline:
                 f"{post_validation.get('hallucination_triggers')}"
             )
             print(
+                f"{prefix}[grounding] evidence_overlap_ratio: {post_validation.get('evidence_overlap_ratio')} "
+                f"missing={post_validation.get('evidence_overlap_missing')}"
+            )
+            print(
                 f"{prefix}[grounding] unsupported_claim_detection: "
                 f"ratio={post_validation.get('unsupported_ratio')} "
                 f"protected_violations={post_validation.get('protected_violations')}"
@@ -494,8 +529,50 @@ class RAGPipeline:
             print(f"{prefix}[grounding] post_generation_checks: (skipped — blocked before generation)")
         print(f"{prefix}[grounding] hallucination_fallback_triggers: {triggers}")
 
-    def _format_context(self, chunks: list) -> str:
-        """Format retrieved chunks as explicit evidence blocks for the LLM prompt."""
+    def _build_evidence_from_chunks(self, question: str, chunks: list) -> tuple[str, str, dict[str, Any]]:
+        """Sentence-level rerank + pattern boosts; fallback to chunk blocks if empty."""
+        if not chunks:
+            return "", "", {}
+
+        max_chars = max(400, self._settings.max_context_tokens * 4 - 500)
+        scored, dbg = score_sentences_for_query(question, chunks, self._retriever._reranker)
+        scored = dedupe_sentences(scored)
+        packed, corpus = pack_evidence_sentences(scored, max_chars)
+
+        if not packed:
+            fb = self._format_chunk_evidence_fallback(chunks)
+            cp = build_retrieval_corpus(chunks)
+            return fb, cp, {
+                **dbg,
+                "mode": "chunk_fallback",
+                "packed_count": 0,
+                "selected": [],
+            }
+
+        blocks = format_sentence_evidence_blocks(packed)
+        meta = {
+            **dbg,
+            "mode": "sentence",
+            "packed_count": len(packed),
+            "selected": [
+                {
+                    "preview": (p.text[:160] + "…") if len(p.text) > 160 else p.text,
+                    "sentence_rerank_score": round(p.rerank_score, 4),
+                    "final_score": round(p.final_score, 4),
+                    "definition_boost": round(p.definition_boost, 4),
+                    "definition_pattern_labels": p.definition_labels,
+                    "query_type_boost": round(p.query_type_boost, 4),
+                    "query_type_tags": p.query_type_tags,
+                    "page": p.page_display,
+                    "chunk_id": p.chunk_id,
+                }
+                for p in packed
+            ],
+        }
+        return blocks, corpus, meta
+
+    def _format_chunk_evidence_fallback(self, chunks: list) -> str:
+        """Coarse evidence blocks when sentence packing yields nothing."""
         if not chunks:
             return ""
 
@@ -571,10 +648,10 @@ class RAGPipeline:
         chunks: list,
         question: str,
         history: list[dict[str, str]] | None,
-    ) -> list:
-        """Remove lowest-ranked chunks first until the estimated prompt fits max_context_tokens."""
+    ) -> tuple[list, str, str, dict[str, Any]]:
+        """Remove lowest-ranked chunks until sentence-packed prompt fits max_context_tokens."""
         if not chunks:
-            return []
+            return [], "", "", {}
 
         ranked = sorted(
             chunks,
@@ -586,13 +663,15 @@ class RAGPipeline:
 
         while working:
             ordered = sorted(working, key=lambda c: (c.page_number or 0, c.chunk_index))
-            evidence_blocks = self._format_context(ordered)
+            evidence_blocks, corpus_plain, meta = self._build_evidence_from_chunks(question, ordered)
             user_message = build_rag_user_message(evidence_blocks, question)
             if self._estimate_prompt_tokens(RAG_SYSTEM_PROMPT, user_message, history) <= budget:
-                return ordered
+                return ordered, evidence_blocks, corpus_plain, meta
             working.pop()
 
-        return sorted(ranked[:1], key=lambda c: (c.page_number or 0, c.chunk_index))
+        ordered = sorted(ranked[:1], key=lambda c: (c.page_number or 0, c.chunk_index))
+        eb, cp, m = self._build_evidence_from_chunks(question, ordered)
+        return ordered, eb, cp, m
 
     def _dedupe_sources(self, chunks: list) -> list[dict[str, Any]]:
         grouped: dict[tuple[str, int | None], Any] = {}
