@@ -1,65 +1,47 @@
 """
 src/llm/prompts.py — Prompt templates for the RAG pipeline.
 
-Prompts are configuration, not code. Keeping them here means they
-can be tuned without touching pipeline logic.
+Evidence blocks and instructions are composed into the user message.
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SYSTEM PROMPT — Strict grounded answering (instructions only; context is user message)
+# SYSTEM PROMPT — Minimal; evidence and rules live in the user message
 # ─────────────────────────────────────────────────────────────────────────────
-RAG_SYSTEM_PROMPT = """You are a research assistant answering questions strictly from retrieved document context.
-
-Rules:
-
-* Use ONLY the retrieved context.
-* Do NOT use outside/world knowledge.
-* If the answer is not clearly supported by retrieved context, say:
-  'The retrieved documents do not contain enough information to answer confidently.'
-* Never invent expansions for acronyms.
-* Never infer meanings from prior training knowledge.
-* Prefer direct explanations from retrieved text.
-* Quote or paraphrase retrieved content faithfully.
-* For queries mentioning SeaKR, ReAL, DRAGIN, FLARE, or CRAG: do not expand those labels unless the same wording appears in the retrieved context.
-
-Answering process:
-
-1. Identify relevant retrieved chunks.
-
-2. Extract supporting statements.
-
-3. Summarize only supported information.
-
-4. If evidence is weak, explicitly say so."""
+RAG_SYSTEM_PROMPT = """You answer strictly from the Retrieved Evidence in the user message.
+Follow the Instructions section exactly. Do not use general knowledge beyond what appears in the quoted evidence."""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# USER MESSAGE — Retrieved context is isolated from instructions
+# USER MESSAGE — Retrieved Evidence + Instructions + Question
 # ─────────────────────────────────────────────────────────────────────────────
-ACRONYM_CONSTRAINTS_BLOCK = """=== ACRONYM CONSTRAINTS (mandatory) ===
-The question references one or more of: SeaKR, ReAL, DRAGIN, FLARE, CRAG.
-You MUST NOT spell out, expand, or reinterpret these labels unless the identical expansion or definition appears verbatim in the retrieved context above.
+RAG_USER_MESSAGE_TEMPLATE = """Retrieved Evidence:
 
-"""
+{evidence_blocks}
 
-RAG_USER_MESSAGE_TEMPLATE = """=== RETRIEVED DOCUMENT CONTEXT (answer ONLY from this section) ===
-{context}
-=== END RETRIEVED DOCUMENT CONTEXT ===
+Instructions:
 
-{acronym_constraints_block}=== QUESTION ===
+* Answer ONLY using retrieved evidence.
+* Do NOT use outside knowledge.
+* Do NOT expand acronyms unless explicitly present in evidence.
+* If evidence is insufficient, say:
+  "The retrieved documents do not contain enough information."
+
+Question:
 {question}
 """
 
 
-def build_rag_user_message(question: str, context: str) -> str:
-    """Compose the user turn: labeled context, optional acronym guardrails, then the question."""
-    from src.llm.grounding import protected_acronyms_in_query
-
-    block = ACRONYM_CONSTRAINTS_BLOCK if protected_acronyms_in_query(question) else ""
+def build_rag_user_message(evidence_blocks: str, question: str) -> str:
+    """Compose user turn: labeled evidence blocks, instructions, then the question."""
     return RAG_USER_MESSAGE_TEMPLATE.format(
-        context=context,
-        acronym_constraints_block=block,
+        evidence_blocks=evidence_blocks.strip() or '(No evidence blocks.)',
         question=question.strip(),
     )
+
+
+def format_evidence_chunk_block(chunk_index: int, page_display: str, quoted_body: str) -> str:
+    """One evidence block: [Chunk N | Page X] plus quoted text."""
+    safe = quoted_body.replace('"', "'")
+    return f'[Chunk {chunk_index} | Page {page_display}]\n"{safe}"'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,11 +58,9 @@ FALLBACK_RESPONSE = (
 # Programmatic weak-evidence / grounding failure (exact wording per requirements)
 INSUFFICIENT_DOCUMENT_EVIDENCE = "The retrieved documents do not contain enough information."
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONTEXT FORMAT — Each chunk with citation + chunk id for traceability
-# ─────────────────────────────────────────────────────────────────────────────
-CONTEXT_CHUNK_TEMPLATE = """\
-[Chunk ID: {chunk_id}] [Source: {source_file}{page_info}] [Relevance: {score:.2f}]
----
-{content}
-"""
+# Legacy / model variations accepted as abstention (post-check only)
+INSUFFICIENT_DISCLAIMER_MARKERS = (
+    "the retrieved documents do not contain enough information",
+    "do not contain enough information to answer confidently",
+    "not enough information",
+)
