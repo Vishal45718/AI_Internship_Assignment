@@ -13,6 +13,7 @@ Swap providers by changing LLM_PROVIDER in your .env file.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 
@@ -67,7 +68,8 @@ class OpenAIClient(BaseLLMClient):
 
         self._client = OpenAI(api_key=settings.openai_api_key)
         self._model = settings.openai_model
-        logger.info("OpenAI client ready: model=%s", self._model)
+        self._max_output_tokens = settings.llm_max_output_tokens
+        logger.info("OpenAI client ready: model=%s max_output_tokens=%s", self._model, self._max_output_tokens)
 
     def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
         last_error: Exception | None = None
@@ -82,7 +84,7 @@ class OpenAIClient(BaseLLMClient):
                     model=self._model,
                     messages=messages,
                     temperature=0.1,  # Low = more grounded, less creative
-                    max_tokens=2048,
+                    max_tokens=self._max_output_tokens,
                 )
                 return response.choices[0].message.content or ""
             except Exception as exc:
@@ -108,7 +110,7 @@ class OpenAIClient(BaseLLMClient):
                 model=self._model,
                 messages=messages,
                 temperature=0.1,
-                max_tokens=2048,
+                max_tokens=self._max_output_tokens,
                 stream=True,
             )
             for chunk in response:
@@ -148,7 +150,12 @@ class GeminiClient(BaseLLMClient):
         self._client = self._genai.Client(api_key=settings.gemini_api_key)
         # Handle cases where model name might still have the old 'models/' prefix
         self._model_name = settings.gemini_model.replace("models/", "")
-        logger.info("Gemini client ready: model=%s", self._model_name)
+        self._max_output_tokens = settings.llm_max_output_tokens
+        logger.info(
+            "Gemini client ready: model=%s max_output_tokens=%s",
+            self._model_name,
+            self._max_output_tokens,
+        )
 
     def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
         combined = f"{system_prompt}\n\nUser question: {user_message}"
@@ -160,7 +167,7 @@ class GeminiClient(BaseLLMClient):
                     contents=combined,
                     config=self._genai.types.GenerateContentConfig(
                         temperature=0.1,
-                        max_output_tokens=2048,
+                        max_output_tokens=self._max_output_tokens,
                     ),
                 )
                 return response.text or ""
@@ -183,7 +190,7 @@ class GeminiClient(BaseLLMClient):
                 contents=combined,
                 config=self._genai.types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=2048,
+                    max_output_tokens=self._max_output_tokens,
                 ),
             )
             for chunk in response:
@@ -291,15 +298,43 @@ class OpenRouterClient(BaseLLMClient):
             raise RuntimeError("openai not installed. Run: pip install openai")
 
         settings = get_settings()
-        if not settings.openrouter_api_key:
+        provider = settings.llm_provider
+        base_url = (os.getenv("OPENROUTER_BASE_URL") or settings.openrouter_base_url).rstrip("/")
+        api_key = os.getenv("OPENROUTER_API_KEY") or settings.openrouter_api_key
+        model_name = settings.openrouter_model
+        has_key = bool(api_key)
+
+        logger.info(
+            "Initializing provider=%s base_url=%s model=%s api_key_present=%s",
+            provider,
+            base_url,
+            model_name,
+            has_key,
+        )
+
+        if not has_key:
             raise RuntimeError("OPENROUTER_API_KEY is not set in .env")
 
+        if base_url != "https://openrouter.ai/api/v1":
+            logger.warning(
+                "OPENROUTER_BASE_URL is '%s' (expected https://openrouter.ai/api/v1)",
+                base_url,
+            )
+
         self._client = OpenAI(
-            base_url=settings.openrouter_base_url,
-            api_key=settings.openrouter_api_key,
+            api_key=api_key,
+            base_url=base_url,
         )
-        self._model = settings.openrouter_model
-        logger.info("OpenRouter client ready: model=%s", self._model)
+        self._model = model_name
+        self._base_url = base_url
+        self._max_output_tokens = settings.llm_max_output_tokens
+        logger.info("Using OpenRouter provider successfully")
+        logger.info(
+            "OpenRouter client ready: model=%s base_url=%s max_output_tokens=%s",
+            self._model,
+            self._base_url,
+            self._max_output_tokens,
+        )
 
     def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
         messages = [{"role": "system", "content": system_prompt}]
@@ -309,10 +344,15 @@ class OpenRouterClient(BaseLLMClient):
 
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
+                logger.debug(
+                    "OpenRouter chat.completions max_tokens=%s",
+                    self._max_output_tokens,
+                )
                 response = self._client.chat.completions.create(
                     model=self._model,
                     messages=messages,
                     temperature=0.1,
+                    max_tokens=self._max_output_tokens,
                 )
                 return response.choices[0].message.content or ""
             except Exception as exc:
@@ -340,10 +380,15 @@ class OpenRouterClient(BaseLLMClient):
         messages.append({"role": "user", "content": user_message})
 
         try:
+            logger.debug(
+                "OpenRouter streaming chat.completions max_tokens=%s",
+                self._max_output_tokens,
+            )
             response = self._client.chat.completions.create(
                 model=self._model,
                 messages=messages,
                 temperature=0.1,
+                max_tokens=self._max_output_tokens,
                 stream=True,
             )
             for chunk in response:
