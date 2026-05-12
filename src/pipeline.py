@@ -30,6 +30,7 @@ from src.retrieval.sentence_evidence import (
 from src.llm.client import create_llm_client
 from src.llm.prompts import (
     RAG_SYSTEM_PROMPT,
+    RAG_SYSTEM_PROMPT_COMPACT,
     FALLBACK_RESPONSE,
     INSUFFICIENT_DOCUMENT_EVIDENCE,
     build_rag_user_message,
@@ -158,11 +159,12 @@ class RAGPipeline:
 
     def _query_general(self, question: str, history: list[dict[str, str]] | None) -> dict[str, Any]:
         system_prompt = "You are a helpful AI assistant. Answer the user's questions clearly and concisely."
+        bounded_history = self._limit_history_turns(history, max_messages=2)
         try:
             answer = self._llm.generate(
                 system_prompt=system_prompt,
                 user_message=question,
-                history=history,
+                history=bounded_history,
             )
             return {
                 "answer": answer,
@@ -207,12 +209,19 @@ class RAGPipeline:
                 "top_score": result.top_score,
             }
 
-        # Step 4: Enforce prompt token budget (trim lowest-ranked chunks first), sentence-level evidence
-        chunks_for_llm, evidence_blocks, corpus_plain, sentence_meta = self._trim_chunks_for_prompt_budget(
-            result.chunks, question, history
+        # Step 4: Build stateless/bounded prompt and enforce hard budget.
+        prompt_plan = self._build_document_prompt_plan(
+            question=question,
+            retrieved_chunks=result.chunks,
+            history=history,
         )
+        chunks_for_llm = prompt_plan["chunks_for_llm"]
+        evidence_blocks = prompt_plan["evidence_blocks"]
+        corpus_plain = prompt_plan["corpus_plain"]
+        sentence_meta = prompt_plan["sentence_meta"]
+        effective_history = prompt_plan["history"]
+        system_prompt = prompt_plan["system_prompt"]
         user_message = build_rag_user_message(evidence_blocks, question)
-        system_prompt = RAG_SYSTEM_PROMPT
 
         print(
             "Sentence evidence: "
@@ -252,7 +261,14 @@ class RAGPipeline:
                 },
             }
 
-        prompt_tokens = self._estimate_prompt_tokens(system_prompt, user_message, history)
+        token_breakdown = self._prompt_token_breakdown(
+            system_prompt=system_prompt,
+            history=effective_history,
+            evidence_blocks=evidence_blocks,
+            user_message=user_message,
+        )
+        prompt_tokens = token_breakdown["final_prompt_tokens"]
+        self._print_prompt_token_breakdown(token_breakdown)
 
         # Step 4b: Compute dynamic max_tokens to prevent 402 errors
         safe_max_tokens = self._compute_safe_max_tokens(prompt_tokens)
@@ -273,7 +289,7 @@ class RAGPipeline:
             answer = self._llm.generate(
                 system_prompt=system_prompt,
                 user_message=user_message,
-                history=history,
+                history=effective_history,
                 max_tokens=safe_max_tokens,
             )
         except Exception as exc:
@@ -292,7 +308,7 @@ class RAGPipeline:
                 answer = self._llm.generate(
                     system_prompt=system_prompt + STRICT_REGENERATION_SYSTEM_SUFFIX,
                     user_message=user_message,
-                    history=history,
+                    history=effective_history,
                     max_tokens=safe_max_tokens,
                 )
                 regenerated = True
@@ -354,8 +370,9 @@ class RAGPipeline:
 
         if mode == "general":
             system_prompt = "You are a helpful AI assistant. Answer the user's questions clearly and concisely."
+            bounded_history = self._limit_history_turns(history, max_messages=2)
             try:
-                for token in self._llm.stream(system_prompt, question, history):
+                for token in self._llm.stream(system_prompt, question, bounded_history):
                     yield "token", token
             except Exception as exc:
                 logger.error("LLM streaming failed: %s", exc)
@@ -377,11 +394,18 @@ class RAGPipeline:
         print(f"[stream] Expanded chunk count: {result.expanded_chunk_count}")
         print(f"[stream] Final chunk count: {result.final_chunk_count}")
 
-        chunks_for_llm, evidence_blocks, corpus_plain, sentence_meta = self._trim_chunks_for_prompt_budget(
-            result.chunks, question, history
+        prompt_plan = self._build_document_prompt_plan(
+            question=question,
+            retrieved_chunks=result.chunks,
+            history=history,
         )
+        chunks_for_llm = prompt_plan["chunks_for_llm"]
+        evidence_blocks = prompt_plan["evidence_blocks"]
+        corpus_plain = prompt_plan["corpus_plain"]
+        sentence_meta = prompt_plan["sentence_meta"]
+        effective_history = prompt_plan["history"]
+        system_prompt = prompt_plan["system_prompt"]
         user_message = build_rag_user_message(evidence_blocks, question)
-        system_prompt = RAG_SYSTEM_PROMPT
 
         print(
             f"[stream] Sentence evidence: mode={sentence_meta.get('mode')} "
@@ -415,7 +439,14 @@ class RAGPipeline:
         sources = self._dedupe_sources(chunks_for_llm)
         yield "sources", sources
 
-        prompt_tokens = self._estimate_prompt_tokens(system_prompt, user_message, history)
+        token_breakdown = self._prompt_token_breakdown(
+            system_prompt=system_prompt,
+            history=effective_history,
+            evidence_blocks=evidence_blocks,
+            user_message=user_message,
+        )
+        prompt_tokens = token_breakdown["final_prompt_tokens"]
+        self._print_prompt_token_breakdown(token_breakdown, prefix="[stream] ")
 
         # Compute dynamic max_tokens to prevent 402 errors
         safe_max_tokens = self._compute_safe_max_tokens(prompt_tokens)
@@ -435,7 +466,7 @@ class RAGPipeline:
             answer = self._llm.generate(
                 system_prompt=system_prompt,
                 user_message=user_message,
-                history=history,
+                history=effective_history,
                 max_tokens=safe_max_tokens,
             )
         except Exception as exc:
@@ -450,7 +481,7 @@ class RAGPipeline:
                 answer = self._llm.generate(
                     system_prompt=system_prompt + STRICT_REGENERATION_SYSTEM_SUFFIX,
                     user_message=user_message,
-                    history=history,
+                    history=effective_history,
                     max_tokens=safe_max_tokens,
                 )
                 regeneration_attempts = 2
@@ -654,11 +685,119 @@ class RAGPipeline:
                 total += self._estimate_tokens(turn.get("content", ""))
         return total
 
+    def _history_token_count(self, history: list[dict[str, str]] | None) -> int:
+        if not history:
+            return 0
+        return sum(self._estimate_tokens(turn.get("content", "")) for turn in history)
+
+    def _prompt_token_breakdown(
+        self,
+        system_prompt: str,
+        history: list[dict[str, str]] | None,
+        evidence_blocks: str,
+        user_message: str,
+    ) -> dict[str, int]:
+        system_tokens = self._estimate_tokens(system_prompt)
+        history_tokens = self._history_token_count(history)
+        retrieval_context_tokens = self._estimate_tokens(evidence_blocks)
+        final_prompt_tokens = self._estimate_prompt_tokens(system_prompt, user_message, history)
+        return {
+            "system_prompt_tokens": system_tokens,
+            "history_tokens": history_tokens,
+            "retrieval_context_tokens": retrieval_context_tokens,
+            "final_prompt_tokens": final_prompt_tokens,
+        }
+
+    @staticmethod
+    def _print_prompt_token_breakdown(token_breakdown: dict[str, int], prefix: str = "") -> None:
+        print(f"{prefix}System prompt tokens: {token_breakdown['system_prompt_tokens']}")
+        print(f"{prefix}History tokens: {token_breakdown['history_tokens']}")
+        print(f"{prefix}Retrieval context tokens: {token_breakdown['retrieval_context_tokens']}")
+        print(f"{prefix}Final prompt tokens: {token_breakdown['final_prompt_tokens']}")
+
+    @staticmethod
+    def _limit_history_turns(history: list[dict[str, str]] | None, max_messages: int = 2) -> list[dict[str, str]]:
+        if not history:
+            return []
+        valid = [h for h in history if isinstance(h, dict) and h.get("role") in {"user", "assistant"}]
+        if max_messages <= 0:
+            return []
+        return valid[-max_messages:]
+
+    def _document_history(self, history: list[dict[str, str]] | None) -> list[dict[str, str]]:
+        # Stateless retrieval QA mode: no multi-turn memory or prior generated answers.
+        return []
+
+    def _build_document_prompt_plan(
+        self,
+        question: str,
+        retrieved_chunks: list,
+        history: list[dict[str, str]] | None,
+    ) -> dict[str, Any]:
+        budget = min(self._settings.max_context_tokens, 300)
+        ranked_chunks = sorted(
+            retrieved_chunks,
+            key=lambda c: (c.rerank_score if c.rerank_score > 0 else 0.0, c.similarity_score),
+            reverse=True,
+        )
+        working_chunks = list(ranked_chunks)
+        working_history = self._document_history(history)
+        system_prompt = RAG_SYSTEM_PROMPT
+
+        while working_chunks:
+            chunks_for_llm, evidence_blocks, corpus_plain, sentence_meta = self._trim_chunks_for_prompt_budget(
+                chunks=working_chunks,
+                question=question,
+                history=working_history,
+                system_prompt=system_prompt,
+            )
+            user_message = build_rag_user_message(evidence_blocks, question)
+            prompt_tokens = self._estimate_prompt_tokens(system_prompt, user_message, working_history)
+            if prompt_tokens <= budget:
+                return {
+                    "chunks_for_llm": chunks_for_llm,
+                    "evidence_blocks": evidence_blocks,
+                    "corpus_plain": corpus_plain,
+                    "sentence_meta": sentence_meta,
+                    "history": working_history,
+                    "system_prompt": system_prompt,
+                }
+
+            # 1) old history
+            if working_history:
+                working_history.pop(0)
+                continue
+            # 2) low-ranked evidence
+            if len(working_chunks) > 1:
+                working_chunks.pop()
+                continue
+            # 3) system verbosity
+            if system_prompt != RAG_SYSTEM_PROMPT_COMPACT:
+                system_prompt = RAG_SYSTEM_PROMPT_COMPACT
+                continue
+            break
+
+        chunks_for_llm, evidence_blocks, corpus_plain, sentence_meta = self._trim_chunks_for_prompt_budget(
+            chunks=ranked_chunks[:1],
+            question=question,
+            history=[],
+            system_prompt=RAG_SYSTEM_PROMPT_COMPACT,
+        )
+        return {
+            "chunks_for_llm": chunks_for_llm,
+            "evidence_blocks": evidence_blocks,
+            "corpus_plain": corpus_plain,
+            "sentence_meta": sentence_meta,
+            "history": [],
+            "system_prompt": RAG_SYSTEM_PROMPT_COMPACT,
+        }
+
     def _trim_chunks_for_prompt_budget(
         self,
         chunks: list,
         question: str,
         history: list[dict[str, str]] | None,
+        system_prompt: str = RAG_SYSTEM_PROMPT,
     ) -> tuple[list, str, str, dict[str, Any]]:
         """Remove lowest-ranked chunks until sentence-packed prompt fits max_context_tokens."""
         if not chunks:
@@ -677,7 +816,7 @@ class RAGPipeline:
             ordered = sorted(working, key=lambda c: (c.page_number or 0, c.chunk_index))
             evidence_blocks, corpus_plain, meta = self._build_evidence_from_chunks(question, ordered)
             user_message = build_rag_user_message(evidence_blocks, question)
-            prompt_est = self._estimate_prompt_tokens(RAG_SYSTEM_PROMPT, user_message, history)
+            prompt_est = self._estimate_prompt_tokens(system_prompt, user_message, history)
             if prompt_est <= budget:
                 meta["final_prompt_token_estimate"] = prompt_est
                 meta["dropped_evidence_count"] = dropped_count + int(meta.get("dropped_sentence_count", 0))
@@ -687,7 +826,7 @@ class RAGPipeline:
 
         ordered = sorted(ranked[:1], key=lambda c: (c.page_number or 0, c.chunk_index))
         eb, cp, m = self._build_evidence_from_chunks(question, ordered)
-        fallback_prompt_est = self._estimate_prompt_tokens(RAG_SYSTEM_PROMPT, build_rag_user_message(eb, question), history)
+        fallback_prompt_est = self._estimate_prompt_tokens(system_prompt, build_rag_user_message(eb, question), history)
         m["final_prompt_token_estimate"] = fallback_prompt_est
         m["dropped_evidence_count"] = dropped_count + int(m.get("dropped_sentence_count", 0))
         return ordered, eb, cp, m
