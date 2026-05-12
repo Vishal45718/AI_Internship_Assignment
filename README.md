@@ -1,116 +1,254 @@
-# 📄 Full-Stack Agentic RAG — ChatGPT-style Document Q&A
+# Agentic RAG — Document Q&A with Grounded Answers
 
-[![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)](https://python.org)
-[![Next.js](https://img.shields.io/badge/Next.js-15+-black?logo=next.js)](https://nextjs.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green?logo=fastapi)](https://fastapi.tiangolo.com)
-[![ChromaDB](https://img.shields.io/badge/VectorDB-ChromaDB-orange)](https://www.trychroma.com)
+A full-stack **Retrieval-Augmented Generation (RAG)** system for asking questions over your own documents. The backend ingests PDFs and other text sources, embeds them into a vector store, retrieves the most relevant passages, and generates answers that are **tied to retrieved evidence** to reduce unsupported claims.
 
-## Overview
+**Why RAG:** Large language models can generalize from training data; for paper-specific facts, method names, and thresholds, RAG grounds answers in *your* uploaded text instead of guessing.
 
-A complete, production-ready **Retrieval-Augmented Generation (RAG)** web application with a ChatGPT-style UI. 
-The system features two chat modes:
-1. **General AI**: Conversational AI assistant.
-2. **Document Chat**: Grounded Q&A against your uploaded documents with strict hallucination prevention and source citations.
+**Focus:** Grounded document Q&A suited to research-style PDFs and technical notes, with retrieval quality signals and conservative behavior when evidence is weak.
 
-## Architecture
-
-```
-┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
-│  Next.js (UI)   │ ────> │  FastAPI (API)  │ ────> │    ChromaDB     │
-│  TailwindCSS    │ <──── │  Streaming SSE  │ <──── │  (Vector DB)    │
-└─────────────────┘       └─────────────────┘       └─────────────────┘
-                                   │
-                                   v
-                          LLM (OpenAI / Gemini / Ollama)
-```
+---
 
 ## Features
 
-- **ChatGPT-style Web UI**: Beautiful responsive design with dark mode, markdown rendering, and real-time streaming.
-- **Two Chat Modes**: Toggle between General AI and Ask Documents seamlessly.
-- **Multi-format upload**: Upload PDF, TXT, CSV, or Markdown directly from the UI.
-- **Persistent Conversation History**: Chats are saved via an SQLite backend.
-- **Hallucination prevention**: Built-in similarity thresholding ensures the LLM admits when it doesn't know.
-- **Source citations**: Responses cite the exact file and similarity score used to generate the answer.
-- **Robust Error Handling**: Fails gracefully on invalid API keys without retrying blindly.
+| Area | Description |
+|------|-------------|
+| **Document ingestion** | Load PDF, TXT, CSV, Markdown (and related) formats through the API. |
+| **Chunking** | Configurable text splitting with overlap for retrieval granularity. |
+| **Embeddings** | Local **SentenceTransformers** embeddings (default: `all-MiniLM-L6-v2`). |
+| **Chroma vector DB** | Persistent storage and similarity search over chunks. |
+| **Hybrid retrieval** | Optional fusion of dense (vector) and keyword-style retrieval. |
+| **Reranking** | Cross-encoder reranking to better align passages with the query. |
+| **Section-aware retrieval** | Context expansion using document structure (parent chunks / sections where enabled). |
+| **Grounded answering** | Prompts and checks steer the model to cite and stay within evidence. |
+| **Hallucination reduction** | Pre/post validation, entity-aware checks, and cautious fallbacks when support is weak. |
+| **Ollama local inference** | Run a local model (e.g. **phi3:mini**) without a cloud LLM API. |
+| **Frontend UI** | Next.js app: chat modes, upload, streaming responses, sources. |
+| **PDF upload** | Upload PDFs from the UI for indexing and Q&A. |
 
-## Setup Instructions
+---
 
-### 1. Backend Setup (Python)
+## Architecture
+
+End-to-end flow:
+
+```text
+Upload → Chunking → Embeddings → Vector DB → Retrieval → Reranking → LLM Generation → Grounded Answer
+```
+
+1. **Upload** — Files are received by the FastAPI backend and passed into the ingestion pipeline.  
+2. **Chunking** — Documents are split into overlapping chunks suitable for embedding and citation.  
+3. **Embeddings** — Each chunk is embedded with SentenceTransformers.  
+4. **Vector DB** — Embeddings and metadata are stored in **ChromaDB** for similarity search.  
+5. **Retrieval** — Queries retrieve top candidates; optional **hybrid** search improves recall on exact terms.  
+6. **Reranking** — A cross-encoder rescores candidates so the strongest passages surface first.  
+7. **LLM generation** — A local model via **Ollama** (or an alternate provider configured in `.env`) produces an answer conditioned on retrieved text.  
+8. **Grounded answer** — Evidence-first instructions and validation reduce answers that drift from the corpus.
+
+```text
+┌─────────────┐     HTTP/SSE      ┌──────────────┐     ┌─────────────┐
+│  Next.js    │ ◄──────────────► │   FastAPI    │ ◄─► │  ChromaDB   │
+│  (React UI) │                  │   (Python)   │     │  (vectors)  │
+└─────────────┘                  └──────┬───────┘     └─────────────┘
+                                        │
+                                        ▼
+                                 ┌──────────────┐
+                                 │   Ollama     │
+                                 │  (local LLM) │
+                                 └──────────────┘
+```
+
+---
+
+## Tech Stack
+
+| Layer | Technologies |
+|--------|----------------|
+| Backend | **Python**, **FastAPI** |
+| Vector store | **ChromaDB** |
+| Embeddings | **SentenceTransformers** |
+| Inference (local) | **Ollama** |
+| Frontend | **Next.js**, **React**, **TypeScript** |
+
+Additional libraries include SQLAlchemy/SQLite for conversation history, `httpx` for Ollama calls, and `pypdf` for PDF text extraction.
+
+---
+
+## Setup
+
+### Prerequisites
+
+- Python 3.11+ recommended  
+- Node.js 18+ (for the frontend)  
+- [Ollama](https://ollama.com) installed and running  
+
+### 1. Clone and virtual environment
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/rag-system.git
-cd rag-system
+git clone <YOUR_REPOSITORY_URL>
+cd Intern_Assignment
 
-# Create virtual environment and install dependencies
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+```
 
-# Configure environment
+### 2. Ollama and model
+
+Install Ollama, then pull the default local model used in the example config:
+
+```bash
+ollama pull phi3:mini
+```
+
+Ensure the Ollama service is running (typically `http://localhost:11434`).
+
+### 3. Backend environment
+
+```bash
 cp .env.example .env
 ```
-Edit `.env` and add your `OPENAI_API_KEY` (or configure Gemini / Ollama).
 
-### 2. Frontend Setup (Node.js)
+Edit `.env` and set at minimum:
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=phi3:mini
+```
+
+Other keys (embedding path, Chroma location, retrieval thresholds) can remain as in `.env.example` until you tune them.
+
+### 4. Frontend environment
 
 ```bash
 cd frontend
+cp .env.local.example .env.local
+```
+
+Default API base (matches local backend):
+
+```env
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
+```
+
+Install dependencies:
+
+```bash
 npm install
 ```
 
-## Running the Application
+### 5. Run backend and frontend
 
-You need two terminal windows to run both the backend and frontend.
+**Terminal 1 — API**
 
-**Terminal 1 (Backend)**:
 ```bash
 source .venv/bin/activate
 python run_server.py --reload
 ```
-*API runs at http://localhost:8000*
 
-**Terminal 2 (Frontend)**:
+API: `http://127.0.0.1:8000` (health: `GET /`).
+
+**Terminal 2 — UI**
+
 ```bash
 cd frontend
 npm run dev
 ```
-*UI runs at http://localhost:3000*
 
-Open `http://localhost:3000` in your browser.
+Open `http://localhost:3000` (or the port shown by Next.js).
 
-## VS Code Environment Configuration
+---
 
-If you encounter API Key issues, ensure your VS Code terminal loads `.env` variables automatically:
-1. Open VS Code Settings (`Ctrl + ,`)
-2. Search for: `python.terminal.useEnvFile`
-3. Check the box to enable it.
-4. Restart your terminal.
+## Example queries
 
-## Project Structure
+After uploading one or more research PDFs, try **document** mode:
 
-```
-project/
-├── backend/                  # FastAPI Application Layer
+- “How does SeaKR decide when retrieval is necessary?”
+- “What limitations does the paper mention about retrieval strategies?”
+- “How does DRAGIN reformulate retrieval queries?”
+- “What does ReAL optimize, according to the paper?”
+
+Answers should reflect **retrieved passages**; if the corpus does not support a detail, the system should avoid inventing it and respond cautiously.
+
+---
+
+## Hallucination prevention (design)
+
+- **Grounded answering** — User and system prompts require using retrieved evidence, not general world knowledge, for paper-specific entities.  
+- **Evidence-based generation** — Retrieved chunks/sentences are injected into the prompt so the model conditions on citeable text.  
+- **Cautious fallback responses** — When retrieval is weak or evidence does not support the question, the pipeline can abstain or give short, honest limitations instead of fabricating facts.  
+- **Rejection of unsupported claims** — Post-generation checks flag unsupported terms, risky expansions, and low overlap with evidence; outputs may be regenerated, pruned, or replaced with a safe response.
+
+This does **not** guarantee correctness on every run; it **reduces** the rate of unsupported statements compared to a plain chat model.
+
+---
+
+## Limitations
+
+- **Acronym-heavy papers** — Models may still confuse similar methods; strict grounding depends on retrieval finding the right spans.  
+- **Retrieval precision** — Wrong or partial matches still lead to incomplete or misleading answers.  
+- **OCR / tables** — PDF text extraction may miss layout, tables, or figures; answers are only as good as the extracted text.  
+- **Small local models** — `phi3:mini` and similar models may miss nuanced reasoning or long-range dependencies even when retrieval is good.
+
+---
+
+## Future improvements
+
+- Stronger **reranking** and fusion strategies (learned rerankers, ColBERT-style retrieval).  
+- **Multimodal** retrieval (figures, slides) where applicable.  
+- **Conversational memory** with clear separation between “chat” and “evidence-backed” turns.  
+- More **agentic** workflows (e.g. query decomposition, multi-step retrieval) with guardrails.  
+- Larger or more capable **local** or **hosted** LLMs when hardware or API budget allows.
+
+---
+
+## Project structure
+
+```text
+Intern_Assignment/
+├── backend/
 │   └── app/
-│       ├── api/              # API Routers (Chat, Upload, History)
-│       ├── storage/          # SQLite DB schema and session
-│       └── main.py           # FastAPI entry point
-│
-├── frontend/                 # Next.js Application Layer
-│   ├── src/app/              # Next.js Pages (page.tsx, globals.css)
-│   └── package.json          
-│
-├── src/                      # Core RAG Pipeline (Reusable Module)
-│   ├── ingestion/            # PDF/CSV loaders and Chunker
-│   ├── embeddings/           # sentence-transformers
-│   ├── vectordb/             # ChromaDB interface
-│   ├── retrieval/            # Semantic search
-│   ├── llm/                  # Streaming LLM clients (OpenAI/Gemini/Ollama)
-│   └── pipeline.py           # Core orchestrator logic
-│
-├── data/                     # Vector DB and Uploaded Files (ignored in git)
-├── run.py                    # Legacy CLI entry point
-└── run_server.py             # FastAPI entry point
+│       ├── api/           # REST routes (chat, upload, history, status)
+│       ├── storage/       # Conversation / SQLite persistence
+│       └── main.py        # FastAPI app + CORS
+├── frontend/
+│   ├── src/
+│   │   └── app/           # Next.js App Router (page UI)
+│   ├── public/
+│   ├── package.json
+│   └── .env.local.example
+├── src/                   # Core RAG library
+│   ├── ingestion/         # Loaders, chunking
+│   ├── embeddings/        # Embedding model wrapper
+│   ├── vectordb/          # Chroma integration
+│   ├── retrieval/         # Hybrid search, reranking, sentence evidence
+│   ├── llm/               # Prompts, clients, grounding helpers
+│   └── pipeline.py        # Orchestration
+├── tests/                 # pytest suite (retrieval, grounding, hybrid, etc.)
+├── data/
+│   ├── raw/               # Sample / local documents (see data/raw/README.md)
+│   └── vectorstore/       # Chroma persistence (generated)
+├── requirements.txt
+├── run_server.py          # Uvicorn entrypoint
+├── .env.example
+└── README.md
 ```
+
+---
+
+## Demo
+
+| Asset | Link / note |
+|--------|----------------|
+| **Demo video** | *[Add link to screen recording or Loom]* |
+| **Screenshots** | *[Add images or link to folder]* |
+
+---
+
+## License
+
+If this repository is private coursework, clarify license with your instructor. Otherwise add a `LICENSE` file as required.
+
+---
+
+*Internship / coursework submission — engineering-focused RAG stack with grounded document Q&A.*

@@ -12,14 +12,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
 # Load .env explicitly
-load_dotenv()
+load_dotenv(override=True)
 
 # Project root is one directory above src/
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -36,63 +36,44 @@ class Settings(BaseSettings):
     )
 
     # ── LLM Provider ────────────────────────────────────────────────────────
-    llm_provider: Literal["openai", "gemini", "ollama", "openrouter"] = Field(
-        default="openai",
+    llm_provider: Literal["gemini", "ollama"] = Field(
+        default="gemini",
         description="LLM backend to use for answer generation.",
     )
 
-    # OpenAI
-    openai_api_key: str = Field(default="", description="OpenAI API key.")
-    openai_model: str = Field(default="gpt-4o-mini")
-
     # Gemini
     gemini_api_key: str = Field(default="", description="Google Gemini API key.")
-    gemini_model: str = Field(default="gemini-1.5-flash-latest")
-
-    # Ollama (local)
-    ollama_base_url: str = Field(default="http://localhost:11434")
-    ollama_model: str = Field(default="mistral")
-
-    # OpenRouter
-    openrouter_api_key: str = Field(default="", description="OpenRouter API key.")
-    openrouter_model: str = Field(default="google/gemini-2.0-flash-001")
-    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
+    gemini_model: str = Field(default="gemini-1.5-flash-8b")
+    # Ollama
+    ollama_base_url: str = Field(default="http://localhost:11434", description="Ollama server base URL.")
+    ollama_model: str = Field(default="phi3:mini", description="Ollama model tag, e.g. phi3:mini.")
 
     # ── LLM generation (output token cap; keeps OpenRouter costs predictable) ──
     llm_max_output_tokens: int = Field(
-        default=32,
+        default=64,
         ge=32,
-        le=128,
-        description="Max completion tokens per request (ultra-aggressive cap for OpenRouter free tier / 402 avoidance).",
+        le=256,
+        description="Max completion tokens per request.",
     )
 
-    @field_validator("openrouter_model", mode="before")
+    @field_validator("gemini_api_key", "gemini_model", "ollama_base_url", "ollama_model")
     @classmethod
-    def validate_openrouter_model(cls, value: str) -> str:
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("OPENROUTER_MODEL must be set when using OpenRouter.")
+    def strip_text_fields(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
 
-        normalized = value.strip()
-        deprecated_map = {
-            "google/gemini-1.5-flash": "google/gemini-2.0-flash-001",
-            "google/gemini-1.5-flash-latest": "google/gemini-2.0-flash-001",
-            "google/gemini-flash-1.5": "google/gemini-2.0-flash-001",
-        }
-        if normalized in deprecated_map:
-            logger.warning(
-                "OPENROUTER_MODEL '%s' is deprecated. Using '%s' instead.",
-                normalized,
-                deprecated_map[normalized],
-            )
-            normalized = deprecated_map[normalized]
-
-        if " " in normalized:
-            raise ValueError("OPENROUTER_MODEL must not contain spaces.")
-        if "/" not in normalized:
-            raise ValueError(
-                "OPENROUTER_MODEL must be a valid OpenRouter model identifier, e.g. google/gemini-2.0-flash-001"
-            )
-        return normalized
+    @model_validator(mode="after")
+    def validate_provider_requirements(self) -> "Settings":
+        if self.llm_provider == "gemini":
+            if not self.gemini_api_key:
+                raise ValueError("GEMINI_API_KEY must be set when LLM_PROVIDER=gemini.")
+            if not self.gemini_model:
+                raise ValueError("GEMINI_MODEL must be set when LLM_PROVIDER=gemini.")
+        elif self.llm_provider == "ollama":
+            if not self.ollama_base_url:
+                raise ValueError("OLLAMA_BASE_URL must be set when LLM_PROVIDER=ollama.")
+            if not self.ollama_model:
+                raise ValueError("OLLAMA_MODEL must be set when LLM_PROVIDER=ollama.")
+        return self
 
     # ── Embedding ────────────────────────────────────────────────────────────
     embedding_model: str = Field(
@@ -155,6 +136,14 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return a cached Settings singleton (reads .env once per process)."""
+    load_dotenv(override=True)
     settings = Settings()
     settings.ensure_directories()
+    logger.info("Active LLM provider: %s", settings.llm_provider)
     return settings
+
+
+def reload_settings() -> Settings:
+    """Clear cached settings and reload from latest .env."""
+    get_settings.cache_clear()
+    return get_settings()

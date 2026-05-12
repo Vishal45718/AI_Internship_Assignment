@@ -25,6 +25,16 @@ _KNOWN_HALLUCINATION_PHRASES: tuple[str, ...] = (
     "reinforcement learning architecture search",
 )
 
+_EXTERNAL_ML_JARGON_GUARDRAIL: tuple[str, ...] = (
+    "transformer attention",
+    "chain-of-thought",
+    "few-shot",
+    "instruction tuning",
+    "rlhf",
+    "foundation model",
+    "pretraining corpus",
+)
+
 _STOPWORDS = frozenset(
     """
     the a an is are was were be been being have has had do does did will would could
@@ -128,15 +138,29 @@ def assess_pre_generation_support(
     for label in missing_entities:
         reasons.append(f"required_entity_missing_in_evidence:{label}")
 
-    if _query_seeks_explanation(question) and not explanatory:
-        reasons.append("explanation_requested_but_evidence_not_explanatory")
+    # Evidence confidence classification: strong / moderate / weak.
+    has_any_chunks = len(chunks) > 0
+    if not has_any_chunks:
+        evidence_confidence = "weak"
+    elif top_score >= max(0.30, rerank_score_threshold + 0.05) and explanatory and not missing_entities:
+        evidence_confidence = "strong"
+    elif top_score >= max(0.10, rerank_score_threshold * 0.40) or explanatory:
+        evidence_confidence = "moderate"
+    else:
+        evidence_confidence = "weak"
 
-    if weak and not explanatory:
-        reasons.append("weak_rerank_and_no_explanatory_sentences")
+    block_reasons: list[str] = []
+    if evidence_confidence == "weak":
+        if not has_any_chunks:
+            block_reasons.append("no_retrieved_chunks")
+        if _query_seeks_explanation(question) and not explanatory:
+            block_reasons.append("explanation_requested_but_evidence_not_explanatory")
+        if weak and not explanatory:
+            block_reasons.append("weak_rerank_and_no_explanatory_sentences")
 
     deduped: list[str] = []
     seen_r: set[str] = set()
-    for r in reasons:
+    for r in block_reasons:
         if r not in seen_r:
             deduped.append(r)
             seen_r.add(r)
@@ -146,6 +170,16 @@ def assess_pre_generation_support(
         "top_rerank_score": top_score,
         "explanatory_sentences": explanatory,
         "missing_required_entities": missing_entities,
+        "warning_reasons": reasons,
+        "evidence_confidence": evidence_confidence,
+        "accepted_partial_evidence": [
+            {
+                "chunk_id": c.chunk_id,
+                "section_title": getattr(c, "section_title", ""),
+                "preview": (c.content[:160] + "…") if len(c.content) > 160 else c.content,
+            }
+            for c in chunks[:3]
+        ],
     }
     return (len(deduped) == 0), deduped, debug
 
@@ -230,6 +264,9 @@ def detect_known_hallucination_phrases(answer: str, corpus_normalized: str) -> l
     for phrase in _KNOWN_HALLUCINATION_PHRASES:
         if phrase in a and phrase not in corpus_normalized:
             triggers.append(f"known_hallucination_pattern:{phrase}")
+    for phrase in _EXTERNAL_ML_JARGON_GUARDRAIL:
+        if phrase in a and phrase not in corpus_normalized:
+            triggers.append(f"external_ml_jargon:{phrase}")
     return triggers
 
 
@@ -265,6 +302,9 @@ _DISCLAIMER_MARKERS = (
     "the retrieved documents do not contain enough information",
     "do not contain enough information to answer confidently",
     "not enough information",
+    "does not explicitly specify this",
+    "only partially describes",
+    "does not provide exact values",
 )
 
 
@@ -347,12 +387,12 @@ def validate_post_generation(
 
     ratio = (len(unsupported) / len(sig)) if sig else 0.0
     unsupported_cap = [t for t in unsupported if t[:1].isupper() or any(c.isupper() for c in t)]
-    large_claim = ratio > 0.38 or len(unsupported_cap) >= 4
-    noun_fail = len(noun_bad) >= 5
-    overlap_fail = overlap_ratio < 0.28 and len(sig) >= 5
+    large_claim = ratio > 0.50 or len(unsupported_cap) >= 6
+    noun_fail = len(noun_bad) >= 7
+    overlap_fail = overlap_ratio < 0.18 and len(sig) >= 7
 
     ok = (
-        ratio <= 0.42
+        ratio <= 0.55
         and not prot_viol
         and not large_claim
         and not halluc_triggers
@@ -370,17 +410,20 @@ def validate_post_generation(
     )
 
     regenerate = (
-        (not ok)
-        or bool(prot_viol)
+        bool(prot_viol)
         or bool(halluc_triggers)
-        or (ratio > 0.30 and len(unsupported) >= 3)
+        or (ratio > 0.55 and len(unsupported) >= 5)
         or overlap_fail
-        or (overlap_ratio < 0.34 and len(sig) >= 8)
+        or (overlap_ratio < 0.22 and len(sig) >= 10)
     )
 
+    synthesis_confidence_level = (
+        "strong" if confidence >= 0.72 else "moderate" if confidence >= 0.40 else "weak"
+    )
     return {
         "ok": ok,
         "grounding_confidence": round(confidence, 3),
+        "synthesis_confidence": synthesis_confidence_level,
         "unsupported_terms": unsupported[:25],
         "unsupported_noun_phrases": noun_bad[:25],
         "hallucination_triggers": halluc_triggers,
@@ -393,9 +436,46 @@ def validate_post_generation(
     }
 
 
+def _split_sentences_for_pruning(text: str) -> list[str]:
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _is_sentence_supported(sentence: str, corpus_normalized: str) -> bool:
+    sig = [t for t in _significant_tokens(sentence) if len(t) >= 5]
+    if not sig:
+        return True
+    present = 0
+    for tok in sig:
+        if re.search(rf"\b{re.escape(tok)}\b", corpus_normalized):
+            present += 1
+    return (present / len(sig)) >= 0.55
+
+
+def prune_unsupported_answer_sentences(answer: str, corpus: str) -> tuple[str, list[str]]:
+    """
+    Remove unsupported answer sentences and return (cleaned_answer, removed_sentences).
+    """
+    stripped = answer.strip()
+    if _is_insufficient_disclaimer(stripped):
+        return stripped, []
+
+    corpus_n = _normalize_corpus(corpus)
+    kept: list[str] = []
+    removed: list[str] = []
+    for sent in _split_sentences_for_pruning(stripped):
+        if _is_sentence_supported(sent, corpus_n):
+            kept.append(sent)
+        else:
+            removed.append(sent)
+
+    cleaned = " ".join(kept).strip()
+    return cleaned, removed
+
+
 STRICT_REGENERATION_SYSTEM_SUFFIX = (
     "\n\nREGENERATION: Answer only from explicit evidence. Max 2–4 short sentences. "
     "No generic ML explanations. Quote or tightly paraphrase evidence only. "
-    "If you cannot, reply exactly: "
-    '"The retrieved documents do not contain enough information."'
+    "If evidence is partial, give one grounded summary sentence plus one concise limitation sentence. "
+    "If you cannot answer from evidence, reply with one concise limitation sentence."
 )

@@ -22,6 +22,27 @@ from src.config import get_settings
 from src.retrieval.reranker import CrossEncoderReranker
 
 logger = logging.getLogger(__name__)
+_METHOD_ENTITIES = ("SeaKR", "DRAGIN", "ReAL", "FLARE", "CRAG")
+_METHOD_DEFINITION_PATTERNS: tuple[tuple[re.Pattern[str], float], ...] = (
+    (re.compile(r"\bproposes?\b", re.I), 0.10),
+    (re.compile(r"\bintroduces?\b", re.I), 0.10),
+    (re.compile(r"\boptimizes?\b", re.I), 0.10),
+    (re.compile(r"\breformulates?\b", re.I), 0.12),
+    (re.compile(r"retrieval is triggered", re.I), 0.14),
+    (re.compile(r"\bconsistency\b", re.I), 0.08),
+    (re.compile(r"attention weights", re.I), 0.14),
+    (re.compile(r"query reformulation", re.I), 0.12),
+    (re.compile(r"optimization objective", re.I), 0.12),
+)
+_EVALUATION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\brecall@k\b", re.I),
+    re.compile(r"\bmrr\b", re.I),
+    re.compile(r"\bprecision\b", re.I),
+    re.compile(r"\bevaluation\b", re.I),
+    re.compile(r"\bbenchmark\b", re.I),
+    re.compile(r"\btable[s]?\b", re.I),
+    re.compile(r"\bmetric[s]?\b", re.I),
+)
 
 
 class SemanticRetriever:
@@ -81,11 +102,17 @@ class SemanticRetriever:
             if entities["entities"]:
                 return "acronym_lookup"
             return "definition"
+        if any(method.lower() in q_lower for method in _METHOD_ENTITIES):
+            if any(token in q_lower for token in ("metric", "precision", "recall", "mrr", "evaluation", "benchmark", "table")):
+                return "metrics"
+            return "entity_method"
         if entities["acronym_entities"] or entities["mixed_case_entities"]:
             return "acronym_lookup"
         return "general"
 
     def _adaptive_weights(self, query_type: str, entities: dict[str, Any]) -> tuple[float, float]:
+        if query_type == "entity_method":
+            return 0.25, 0.75
         if query_type == "acronym_lookup":
             return 0.35, 0.65
         if query_type == "comparison":
@@ -94,6 +121,8 @@ class SemanticRetriever:
             return 0.55, 0.45
         if query_type == "definition":
             return 0.60, 0.40
+        if query_type == "metrics":
+            return 0.50, 0.50
         if entities["acronym_entities"] or entities["mixed_case_entities"] or entities["quoted_phrases"]:
             return 0.45, 0.55
         return 0.65, 0.35
@@ -131,13 +160,48 @@ class SemanticRetriever:
         return min(0.75, boost)
 
     def _section_title_boost(self, chunk: RetrievedChunk, entities: dict[str, Any]) -> float:
-        if not chunk.section_title or not entities["entities"]:
+        heading_text = chunk.section_title or ""
+        if not heading_text or not entities["entities"]:
             return 0.0
-        title = chunk.section_title
         for entity in entities["entities"]:
-            if re.search(rf"\b{re.escape(entity)}\b", title, flags=re.IGNORECASE):
+            if re.search(rf"\b{re.escape(entity)}\b", heading_text, flags=re.IGNORECASE):
                 return 0.22
         return 0.0
+
+    def _method_definition_boost(self, chunk: RetrievedChunk) -> float:
+        text = f"{chunk.section_title or ''}\n{chunk.content}"
+        total = 0.0
+        for pat, weight in _METHOD_DEFINITION_PATTERNS:
+            if pat.search(text):
+                total += weight
+        return min(0.30, total)
+
+    def _evaluation_penalty(self, chunk: RetrievedChunk, query_features: dict[str, Any]) -> float:
+        if query_features["query_type"] == "metrics":
+            return 0.0
+        text = f"{chunk.section_title or ''}\n{chunk.content}"
+        if any(pattern.search(text) for pattern in _EVALUATION_PATTERNS):
+            return 0.18
+        return 0.0
+
+    def _method_focus_penalty(self, chunk: RetrievedChunk, query_features: dict[str, Any]) -> float:
+        if query_features["query_type"] != "entity_method":
+            return 0.0
+        method_entities = self._method_entities_in_query(query_features["entities"])
+        if not method_entities:
+            return 0.0
+        text = f"{chunk.section_title or ''} {chunk.content}"
+        if any(re.search(rf"\b{re.escape(entity)}\b", text, flags=re.IGNORECASE) for entity in method_entities):
+            return 0.0
+        return 0.20
+
+    def _method_entities_in_query(self, entities: dict[str, Any]) -> list[str]:
+        labels: list[str] = []
+        for e in entities.get("entities", []):
+            for target in _METHOD_ENTITIES:
+                if e.lower() == target.lower():
+                    labels.append(target)
+        return sorted(set(labels))
 
     def _diversify_by_page(self, chunks: list[RetrievedChunk], max_per_page: int = 2) -> list[RetrievedChunk]:
         page_counts: dict[int, int] = defaultdict(int)
@@ -297,12 +361,13 @@ class SemanticRetriever:
                 base_ranked,
                 self._settings.parent_window_before,
                 self._settings.parent_window_after,
+                query_features=query_features,
             )
         else:
             expanded = base_ranked
 
         # Enforce final chunk and token limits; remove lowest-ranked first.
-        final_chunks = self._apply_limits(expanded, base_ranked)
+        final_chunks = self._apply_limits(expanded, base_ranked, query_features)
         final_tokens = self._estimate_token_count(final_chunks)
         final_chunks.sort(key=lambda c: (c.page_number or 0, c.chunk_index))
         selected_ids = [c.chunk_id for c in final_chunks]
@@ -315,6 +380,11 @@ class SemanticRetriever:
             selected_ids,
             [c.page_number for c in final_chunks],
             [round(c.rerank_score, 4) for c in final_chunks],
+        )
+        logger.info(
+            "[Section Debug] selected_section_titles=%s subsection_matches=%s",
+            sorted({c.section_title for c in final_chunks if c.section_title}),
+            sorted({c.subsection_title for c in final_chunks if c.subsection_title}),
         )
 
         return RetrievalResult(
@@ -378,12 +448,19 @@ class SemanticRetriever:
             keyword_score = entry["keyword_score"] / max_keyword_score if max_keyword_score > 0 else 0.0
             exact_bonus = self._exact_entity_boost(entry["chunk"], query_features["entities"])
             section_boost = self._section_title_boost(entry["chunk"], query_features["entities"])
-            fused_score = min(
-                1.0,
-                vector_score * semantic_weight
-                + keyword_score * keyword_weight
-                + exact_bonus
-                + section_boost,
+            method_boost = self._method_definition_boost(entry["chunk"])
+            fused_score = max(
+                0.0,
+                min(
+                    1.0,
+                    vector_score * semantic_weight
+                    + keyword_score * keyword_weight
+                    + exact_bonus
+                    + section_boost
+                    + method_boost
+                    - self._evaluation_penalty(entry["chunk"], query_features)
+                    - self._method_focus_penalty(entry["chunk"], query_features),
+                ),
             )
 
             fused_chunk = RetrievedChunk(
@@ -429,19 +506,30 @@ class SemanticRetriever:
             base_score = max(0.0, min(1.0, float(score)))
             entity_boost = self._exact_entity_boost(chunk, query_features["entities"])
             section_boost = self._section_title_boost(chunk, query_features["entities"])
-            combined = min(
-                1.0,
-                base_score * 0.62 + chunk.retrieval_score * 0.28 + entity_boost + section_boost,
+            method_boost = self._method_definition_boost(chunk)
+            combined = max(
+                0.0,
+                min(
+                    1.0,
+                    base_score * 0.58
+                    + chunk.retrieval_score * 0.26
+                    + entity_boost
+                    + section_boost
+                    + method_boost
+                    - self._evaluation_penalty(chunk, query_features)
+                    - self._method_focus_penalty(chunk, query_features),
+                ),
             )
             chunk.rerank_score = combined
             reranked.append(chunk)
             logger.info(
-                "[Rerank] Chunk %s: bm25=%.3f semantic=%.3f exact_entity_boost=%.3f section_boost=%.3f final=%.3f",
+                "[Rerank] Chunk %s: bm25=%.3f semantic=%.3f exact_entity_boost=%.3f section_boost=%.3f method_boost=%.3f final=%.3f",
                 chunk.chunk_id,
                 chunk.retrieval_score,
                 base_score,
                 entity_boost,
                 section_boost,
+                method_boost,
                 combined,
             )
         reranked.sort(
@@ -455,6 +543,7 @@ class SemanticRetriever:
         retrieved_chunks: list[RetrievedChunk],
         window_before: int = 1,
         window_after: int = 1,
+        query_features: dict[str, Any] | None = None,
     ) -> tuple[list[RetrievedChunk], list[str], int, int]:
         """
         Expand retrieved chunks with neighboring context.
@@ -501,6 +590,46 @@ class SemanticRetriever:
             if neighbor.section_title:
                 parent_sections_used.add(neighbor.section_title)
 
+        method_entities = self._method_entities_in_query((query_features or {}).get("entities", {}))
+        section_range_logs: list[dict[str, Any]] = []
+        if method_entities:
+            for seed in list(context_chunks.values()):
+                if not any(
+                    re.search(rf"\b{re.escape(m)}\b", f"{seed.section_title} {seed.subsection_title} {seed.content}", re.IGNORECASE)
+                    for m in method_entities
+                ):
+                    continue
+                section_chunks = self._store.get_chunks_by_section(
+                    source_file=seed.source_file,
+                    section_title=seed.section_title,
+                )
+                added = 0
+                for section_chunk in section_chunks:
+                    # subsection-aware local window
+                    same_sub = (
+                        not seed.subsection_title
+                        or section_chunk.subsection_title == seed.subsection_title
+                    )
+                    near_window = abs(section_chunk.chunk_index - seed.chunk_index) <= 2
+                    if not (same_sub or near_window):
+                        continue
+                    if section_chunk.chunk_id not in expanded_ids:
+                        section_chunk.rerank_score = max(seed.rerank_score * 0.96, section_chunk.rerank_score)
+                        section_chunk.retrieval_score = max(seed.retrieval_score * 0.96, section_chunk.retrieval_score)
+                        context_chunks[section_chunk.chunk_id] = section_chunk
+                        expanded_ids.add(section_chunk.chunk_id)
+                        added += 1
+                section_range_logs.append(
+                    {
+                        "entity_matches": method_entities,
+                        "section_title": seed.section_title,
+                        "subsection_title": seed.subsection_title,
+                        "seed_chunk_index": seed.chunk_index,
+                        "expanded_local_range": [max(0, seed.chunk_index - 2), seed.chunk_index + 2],
+                        "added_chunks": added,
+                    }
+                )
+
         if self._settings.parent_expand_full_section:
             section_seed_chunks = list(context_chunks.values())
             for seed in section_seed_chunks:
@@ -528,6 +657,8 @@ class SemanticRetriever:
             "Expanded context: original_ids=%d final_ids=%d overlaps_added=%d",
             len(retrieved_chunks), len(final_chunks), overlap_reduction,
         )
+        if section_range_logs:
+            logger.info("[Section Expansion] %s", section_range_logs)
 
         return final_chunks, sorted(parent_sections_used), overlap_reduction, token_count
 
@@ -535,6 +666,7 @@ class SemanticRetriever:
         self,
         expanded: list[RetrievedChunk],
         base_ranked: list[RetrievedChunk],
+        query_features: dict[str, Any] | None = None,
     ) -> list[RetrievedChunk]:
         rank_map: dict[str, float] = {c.chunk_id: c.rerank_score for c in base_ranked}
         for chunk in expanded:
@@ -545,7 +677,10 @@ class SemanticRetriever:
 
         kept = list(expanded)
         kept.sort(key=lambda c: rank_map.get(c.chunk_id, 0.0), reverse=True)
-        kept = kept[: self._settings.final_context_chunks]
+        chunk_limit = self._settings.final_context_chunks
+        if query_features and query_features.get("query_type") in ("comparison", "entity_method", "metrics"):
+            chunk_limit = max(chunk_limit, 3)
+        kept = kept[:chunk_limit]
 
         # Drop lowest-ranked chunks first until under token budget.
         while kept and self._estimate_token_count(kept) > self._settings.max_context_tokens:

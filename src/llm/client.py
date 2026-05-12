@@ -1,10 +1,9 @@
 """
 src/llm/client.py — LLM provider abstraction with retry logic.
 
-Supports three providers:
-  - "openai"  → OpenAI Chat Completions API
+Supports one provider:
   - "gemini"  → Google Gemini API
-  - "ollama"  → Local Ollama server (free, runs on your machine)
+  - "ollama"  → Local Ollama API
 
 All providers expose the same generate(system_prompt, user_message) interface.
 Swap providers by changing LLM_PROVIDER in your .env file.
@@ -13,7 +12,6 @@ Swap providers by changing LLM_PROVIDER in your .env file.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from abc import ABC, abstractmethod
 
@@ -23,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
 _RETRY_DELAY = 2.0  # seconds
+_MODEL_FALLBACK_CHAIN = ("gemini-1.5-flash-8b", "gemini-1.5-flash")
 
 
 class LLMError(Exception):
@@ -50,112 +49,108 @@ class BaseLLMClient(ABC):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OpenAI
-# ─────────────────────────────────────────────────────────────────────────────
-
-class OpenAIClient(BaseLLMClient):
-    """OpenAI Chat Completions with retry logic."""
-
-    def __init__(self) -> None:
-        try:
-            from openai import OpenAI
-        except ImportError:
-            raise RuntimeError("openai not installed. Run: pip install openai")
-
-        settings = get_settings()
-        if not settings.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set in .env")
-
-        self._client = OpenAI(api_key=settings.openai_api_key)
-        self._model = settings.openai_model
-        self._max_output_tokens = settings.llm_max_output_tokens
-        logger.info("OpenAI client ready: model=%s max_output_tokens=%s", self._model, self._max_output_tokens)
-
-    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None) -> str:
-        last_error: Exception | None = None
-        messages = [{"role": "system", "content": system_prompt}]
-        if history:
-            messages.extend(history)
-        messages.append({"role": "user", "content": user_message})
-        
-        # Use provided max_tokens or fall back to config
-        output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
-
-        for attempt in range(1, _MAX_RETRIES + 1):
-            try:
-                response = self._client.chat.completions.create(
-                    model=self._model,
-                    messages=messages,
-                    temperature=0.1,  # Low = more grounded, less creative
-                    max_tokens=output_tokens,
-                )
-                return response.choices[0].message.content or ""
-            except Exception as exc:
-                err_str = str(exc).lower()
-                if "incorrect api key" in err_str or "invalid_api_key" in err_str or "401" in err_str:
-                    logger.error("Authentication Error: Invalid API Key. Stopping retries.")
-                    raise LLMError(f"Authentication Error: Invalid API Key. Please check your .env file.") from exc
-                
-                logger.error("OpenAI attempt %d failed: %s", attempt, exc)
-                last_error = exc
-                if attempt < _MAX_RETRIES:
-                    time.sleep(_RETRY_DELAY * attempt)
-        raise LLMError(f"OpenAI failed after {_MAX_RETRIES} attempts: {last_error}")
-
-    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None):
-        messages = [{"role": "system", "content": system_prompt}]
-        if history:
-            messages.extend(history)
-        messages.append({"role": "user", "content": user_message})
-        
-        # Use provided max_tokens or fall back to config
-        output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
-
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=output_tokens,
-                stream=True,
-            )
-            for chunk in response:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
-        except Exception as exc:
-            err_str = str(exc).lower()
-            if "incorrect api key" in err_str or "invalid_api_key" in err_str or "401" in err_str:
-                logger.error("Authentication Error: Invalid API Key.")
-                raise LLMError(f"Authentication Error: Invalid API Key. Please check your .env file.") from exc
-            logger.error("OpenAI streaming failed: %s", exc)
-            raise LLMError(f"OpenAI streaming failed: {exc}")
-
-    @property
-    def model_name(self) -> str:
-        return f"openai/{self._model}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Google Gemini
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def _extract_model_name(raw_name: str) -> str:
+    # list_models often returns names like "models/gemini-1.5-flash"
+    return raw_name.replace("models/", "").strip()
+
+
+def list_available_gemini_models(api_key: str) -> list[str]:
+    try:
+        import google.generativeai as genai
+    except ImportError as exc:
+        raise RuntimeError("google-generativeai not installed. Run: pip install google-generativeai") from exc
+
+    genai.configure(api_key=api_key)
+    names: list[str] = []
+    for model in genai.list_models():
+        name = _extract_model_name(getattr(model, "name", ""))
+        if name:
+            names.append(name)
+    return sorted(set(names))
+
+
+def resolve_gemini_model_or_raise(
+    requested_model: str,
+    available_models: list[str],
+    fallback_chain: tuple[str, ...] = _MODEL_FALLBACK_CHAIN,
+) -> str:
+    requested = _extract_model_name(requested_model)
+    if requested in available_models:
+        return requested
+
+    for fallback in fallback_chain:
+        if fallback in available_models:
+            logger.warning(
+                "Configured GEMINI_MODEL '%s' unavailable; falling back to '%s'.",
+                requested,
+                fallback,
+            )
+            return fallback
+
+    preview = ", ".join(available_models[:15]) if available_models else "(none)"
+    raise RuntimeError(
+        f"GEMINI_MODEL '{requested}' is unavailable. Available models: {preview}"
+    )
+
+
+def validate_gemini_startup_or_raise(api_key: str, configured_model: str) -> tuple[str, list[str]]:
+    available = list_available_gemini_models(api_key)
+    resolved = resolve_gemini_model_or_raise(configured_model, available)
+    return resolved, available
+
+
+def validate_ollama_startup_or_raise(base_url: str, configured_model: str) -> tuple[str, list[str]]:
+    try:
+        import httpx
+    except ImportError as exc:
+        raise RuntimeError("httpx not installed. Run: pip install httpx") from exc
+
+    normalized_url = base_url.rstrip("/")
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(f"{normalized_url}/api/tags")
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        raise RuntimeError(f"Unable to reach Ollama at {normalized_url}: {exc}") from exc
+
+    models = data.get("models", []) if isinstance(data, dict) else []
+    available = sorted(
+        {
+            (m.get("name") or "").strip()
+            for m in models
+            if isinstance(m, dict) and (m.get("name") or "").strip()
+        }
+    )
+    if configured_model in available:
+        return configured_model, available
+    preview = ", ".join(available[:20]) if available else "(none)"
+    raise RuntimeError(
+        f"OLLAMA_MODEL '{configured_model}' is unavailable on {normalized_url}. Available models: {preview}"
+    )
+
 class GeminiClient(BaseLLMClient):
-    """Google Gemini API client (using new google.genai SDK)."""
+    """Google Gemini API client using google.generativeai SDK."""
 
     def __init__(self) -> None:
         try:
-            from google import genai
+            import google.generativeai as genai
             self._genai = genai
-        except ImportError:
-            raise RuntimeError("google-genai not installed. Run: pip install google-genai")
+        except ImportError as exc:
+            raise RuntimeError("google-generativeai not installed. Run: pip install google-generativeai") from exc
 
         settings = get_settings()
         if not settings.gemini_api_key:
             raise RuntimeError("GEMINI_API_KEY is not set in .env")
 
-        self._client = self._genai.Client(api_key=settings.gemini_api_key)
-        # Handle cases where model name might still have the old 'models/' prefix
-        self._model_name = settings.gemini_model.replace("models/", "")
+        self._genai.configure(api_key=settings.gemini_api_key)
+        available = list_available_gemini_models(settings.gemini_api_key)
+        self._model_name = resolve_gemini_model_or_raise(settings.gemini_model, available)
+        self._model = self._genai.GenerativeModel(self._model_name)
         self._max_output_tokens = settings.llm_max_output_tokens
         logger.info(
             "Gemini client ready: model=%s max_output_tokens=%s",
@@ -172,11 +167,10 @@ class GeminiClient(BaseLLMClient):
         
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                response = self._client.models.generate_content(
-                    model=self._model_name,
-                    contents=combined,
-                    config=self._genai.types.GenerateContentConfig(
-                        temperature=0.1,
+                response = self._model.generate_content(
+                    combined,
+                    generation_config=self._genai.types.GenerationConfig(
+                        temperature=0.2,
                         max_output_tokens=output_tokens,
                     ),
                 )
@@ -199,11 +193,11 @@ class GeminiClient(BaseLLMClient):
         output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
         
         try:
-            response = self._client.models.generate_content_stream(
-                model=self._model_name,
-                contents=combined,
-                config=self._genai.types.GenerateContentConfig(
-                    temperature=0.1,
+            response = self._model.generate_content(
+                combined,
+                stream=True,
+                generation_config=self._genai.types.GenerationConfig(
+                    temperature=0.2,
                     max_output_tokens=output_tokens,
                 ),
             )
@@ -223,36 +217,50 @@ class GeminiClient(BaseLLMClient):
         return f"gemini/{self._model_name}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Ollama (local, free)
-# ─────────────────────────────────────────────────────────────────────────────
-
 class OllamaClient(BaseLLMClient):
-    """Ollama local LLM client. Requires Ollama running: https://ollama.ai"""
+    """Ollama local LLM client."""
 
     def __init__(self) -> None:
         try:
             import httpx
             self._httpx = httpx
-        except ImportError:
-            raise RuntimeError("httpx not installed. Run: pip install httpx")
+        except ImportError as exc:
+            raise RuntimeError("httpx not installed. Run: pip install httpx") from exc
 
         settings = get_settings()
         self._base_url = settings.ollama_base_url.rstrip("/")
         self._model_id = settings.ollama_model
-        logger.info("Ollama client ready: model=%s url=%s", self._model_id, self._base_url)
+        self._max_output_tokens = settings.llm_max_output_tokens
+        logger.info(
+            "Ollama client ready: model=%s base_url=%s max_output_tokens=%s",
+            self._model_id,
+            self._base_url,
+            self._max_output_tokens,
+        )
 
-    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None) -> str:
+    def generate(
+        self,
+        system_prompt: str,
+        user_message: str,
+        history: list[dict[str, str]] | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
         messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_message})
 
+        output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
         payload = {
             "model": self._model_id,
             "messages": messages,
             "stream": False,
+            "options": {
+                "temperature": 0.2,
+                "num_predict": output_tokens,
+            },
         }
+
         last_error: Exception | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
@@ -268,17 +276,29 @@ class OllamaClient(BaseLLMClient):
                     time.sleep(_RETRY_DELAY)
         raise LLMError(f"Ollama failed after {_MAX_RETRIES} attempts: {last_error}")
 
-    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None):
+    def stream(
+        self,
+        system_prompt: str,
+        user_message: str,
+        history: list[dict[str, str]] | None = None,
+        max_tokens: int | None = None,
+    ):
         import json
+
         messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_message})
 
+        output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
         payload = {
             "model": self._model_id,
             "messages": messages,
             "stream": True,
+            "options": {
+                "temperature": 0.2,
+                "num_predict": output_tokens,
+            },
         }
         try:
             with self._httpx.Client(timeout=120.0) as client:
@@ -291,150 +311,11 @@ class OllamaClient(BaseLLMClient):
                                 yield data["message"]["content"]
         except Exception as exc:
             logger.error("Ollama streaming failed: %s", exc)
-            raise LLMError(f"Ollama streaming failed: {exc}")
+            raise LLMError(f"Ollama streaming failed: {exc}") from exc
 
     @property
     def model_name(self) -> str:
         return f"ollama/{self._model_id}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# OpenRouter (Unified API)
-# ─────────────────────────────────────────────────────────────────────────────
-
-class OpenRouterClient(BaseLLMClient):
-    """OpenRouter API client (OpenAI compatible)."""
-
-    def __init__(self) -> None:
-        try:
-            from openai import OpenAI
-        except ImportError:
-            raise RuntimeError("openai not installed. Run: pip install openai")
-
-        settings = get_settings()
-        provider = settings.llm_provider
-        base_url = (os.getenv("OPENROUTER_BASE_URL") or settings.openrouter_base_url).rstrip("/")
-        api_key = os.getenv("OPENROUTER_API_KEY") or settings.openrouter_api_key
-        model_name = settings.openrouter_model
-        has_key = bool(api_key)
-
-        logger.info(
-            "Initializing provider=%s base_url=%s model=%s api_key_present=%s",
-            provider,
-            base_url,
-            model_name,
-            has_key,
-        )
-
-        if not has_key:
-            raise RuntimeError("OPENROUTER_API_KEY is not set in .env")
-
-        if base_url != "https://openrouter.ai/api/v1":
-            logger.warning(
-                "OPENROUTER_BASE_URL is '%s' (expected https://openrouter.ai/api/v1)",
-                base_url,
-            )
-
-        self._client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-        )
-        self._model = model_name
-        self._base_url = base_url
-        self._max_output_tokens = settings.llm_max_output_tokens
-        logger.info("Using OpenRouter provider successfully")
-        logger.info(
-            "OpenRouter client ready: model=%s base_url=%s max_output_tokens=%s",
-            self._model,
-            self._base_url,
-            self._max_output_tokens,
-        )
-
-    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None) -> str:
-        messages = [{"role": "system", "content": system_prompt}]
-        if history:
-            messages.extend(history)
-        messages.append({"role": "user", "content": user_message})
-        
-        # Use provided max_tokens or fall back to config
-        output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
-        logger.debug("OpenRouter generate: using max_tokens=%d", output_tokens)
-
-        for attempt in range(1, _MAX_RETRIES + 1):
-            try:
-                logger.debug(
-                    "OpenRouter chat.completions max_tokens=%s",
-                    output_tokens,
-                )
-                response = self._client.chat.completions.create(
-                    model=self._model,
-                    messages=messages,
-                    temperature=0.1,
-                    max_tokens=output_tokens,
-                )
-                return response.choices[0].message.content or ""
-            except Exception as exc:
-                err_str = str(exc).lower()
-                if "not a valid model id" in err_str or "invalid model" in err_str or "model not found" in err_str:
-                    logger.error("OpenRouter invalid model configured: %s", self._model)
-                    raise LLMError(
-                        f"Invalid OPENROUTER_MODEL '{self._model}'. "
-                        "Use a supported OpenRouter model like google/gemini-2.0-flash-001."
-                    ) from exc
-                if "incorrect api key" in err_str or "invalid_api_key" in err_str or "401" in err_str:
-                    logger.error("Authentication Error: Invalid OpenRouter API Key.")
-                    raise LLMError(
-                        "Authentication Error: Invalid OpenRouter API Key. Please check your .env file."
-                    ) from exc
-                logger.error("OpenRouter attempt %d failed: %s", attempt, exc)
-                if attempt < _MAX_RETRIES:
-                    time.sleep(_RETRY_DELAY)
-        raise LLMError(f"OpenRouter failed after {_MAX_RETRIES} attempts")
-
-    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None):
-        messages = [{"role": "system", "content": system_prompt}]
-        if history:
-            messages.extend(history)
-        messages.append({"role": "user", "content": user_message})
-        
-        # Use provided max_tokens or fall back to config
-        output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
-        logger.debug("OpenRouter stream: using max_tokens=%d", output_tokens)
-
-        try:
-            logger.debug(
-                "OpenRouter streaming chat.completions max_tokens=%s",
-                output_tokens,
-            )
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=output_tokens,
-                stream=True,
-            )
-            for chunk in response:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
-        except Exception as exc:
-            err_str = str(exc).lower()
-            if "not a valid model id" in err_str or "invalid model" in err_str or "model not found" in err_str:
-                logger.error("OpenRouter invalid model configured: %s", self._model)
-                raise LLMError(
-                    f"Invalid OPENROUTER_MODEL '{self._model}'. "
-                    "Use a supported OpenRouter model like google/gemini-2.0-flash-001."
-                ) from exc
-            if "incorrect api key" in err_str or "invalid_api_key" in err_str or "401" in err_str:
-                logger.error("Authentication Error: Invalid OpenRouter API Key.")
-                raise LLMError(
-                    "Authentication Error: Invalid OpenRouter API Key. Please check your .env file."
-                ) from exc
-            logger.error("OpenRouter streaming failed: %s", exc)
-            raise LLMError(f"OpenRouter streaming failed: {exc}") from exc
-
-    @property
-    def model_name(self) -> str:
-        return f"openrouter/{self._model}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -446,13 +327,11 @@ def create_llm_client() -> BaseLLMClient:
     settings = get_settings()
     provider = settings.llm_provider
 
-    if provider == "openai":
-        return OpenAIClient()
-    elif provider == "gemini":
+    if provider == "gemini":
+        logger.info("Initializing provider=gemini model=%s", settings.gemini_model)
         return GeminiClient()
-    elif provider == "ollama":
+    if provider == "ollama":
+        logger.info("Initializing provider=ollama model=%s", settings.ollama_model)
         return OllamaClient()
-    elif provider == "openrouter":
-        return OpenRouterClient()
     else:
-        raise ValueError(f"Unknown LLM provider: '{provider}'. Use: openai, gemini, ollama, or openrouter")
+        raise ValueError(f"Invalid LLM_PROVIDER '{provider}'. Supported values: gemini, ollama")

@@ -24,7 +24,12 @@ _DEFINITION_PATTERN_SPECS: tuple[tuple[re.Pattern[str], float, str], ...] = (
     (re.compile(r"consists of", re.I), 0.06, "consists_of"),
     (re.compile(r"\buses\b", re.I), 0.05, "uses"),
     (re.compile(r"based on", re.I), 0.06, "based_on"),
+    (re.compile(r"\boptimizes?\b", re.I), 0.08, "optimizes"),
+    (re.compile(r"\breformulates?\b", re.I), 0.08, "reformulates"),
+    (re.compile(r"\buncertainty\b", re.I), 0.08, "uncertainty"),
+    (re.compile(r"\bthreshold\b", re.I), 0.08, "threshold"),
     (re.compile(r"retrieval occurs when", re.I), 0.09, "retrieval_occurs_when"),
+    (re.compile(r"retrieval occurs", re.I), 0.07, "retrieval_occurs"),
 )
 
 _MECHANISM_HINTS = (
@@ -48,6 +53,20 @@ _CAUSAL_HINTS = (
     re.compile(r"\bresulting in\b", re.I),
 )
 _DEF_FOCUS = re.compile(r"\b(define|denoted|meaning|represents|is a)\b", re.I)
+_TABLE_NUMERIC_HINTS: tuple[tuple[re.Pattern[str], float, str], ...] = (
+    (re.compile(r"\d+(?:\.\d+)?\s*%"), 0.08, "percent_value"),
+    (re.compile(r"\b\d+(?:\.\d+)?\b"), 0.05, "numeric_value"),
+    (re.compile(r"(?:<=|>=|<|>|=)\s*\d+(?:\.\d+)?"), 0.08, "comparison_threshold"),
+    (re.compile(r"^\s*[-*]\s+\S+", re.I), 0.05, "bullet_list"),
+    (re.compile(r"\|.+\|"), 0.09, "table_row"),
+)
+_EXACT_ENTITY_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bSeaKR\b"), "SeaKR"),
+    (re.compile(r"\bDRAGIN\b"), "DRAGIN"),
+    (re.compile(r"\bReAL\b"), "ReAL"),
+    (re.compile(r"\bFLARE\b"), "FLARE"),
+    (re.compile(r"\bCRAG\b"), "CRAG"),
+)
 
 
 def _detect_evidence_focus(query: str) -> str:
@@ -65,6 +84,8 @@ def _detect_evidence_focus(query: str) -> str:
         return "threshold"
     if any(q.startswith(p) for p in ("how does", "how do", "how is", "how are")) or "how does" in q:
         return "mechanism"
+    if any(x in q for x in ("parameter", "hyperparameter", "setting", "value")):
+        return "parameter"
     if any(
         q.startswith(p)
         for p in (
@@ -117,7 +138,45 @@ def _content_type_boost(sentence_lower: str, focus: str) -> tuple[float, list[st
         if any(h.search(sentence_lower) for h in _THRESHOLD_HINTS):
             bonus += 0.09
             tags.append("threshold_focus")
+    if focus == "parameter":
+        if any(h.search(sentence_lower) for h in _THRESHOLD_HINTS):
+            bonus += 0.08
+            tags.append("parameter_numeric_focus")
     return min(0.18, bonus), tags
+
+
+def _exact_entity_boost(sentence: str, query: str) -> tuple[float, list[str]]:
+    labels: list[str] = []
+    for pat, label in _EXACT_ENTITY_PATTERNS:
+        if pat.search(query) and pat.search(sentence):
+            labels.append(label)
+    if not labels:
+        return 0.0, []
+    # Strong boost for exact acronym/entity carryover from query.
+    return min(0.28, 0.12 + 0.08 * len(labels)), labels
+
+
+def _table_aware_boost(sentence: str, focus: str) -> tuple[float, list[str]]:
+    total = 0.0
+    labels: list[str] = []
+    for pat, weight, label in _TABLE_NUMERIC_HINTS:
+        if pat.search(sentence):
+            total += weight
+            labels.append(label)
+    if focus in {"threshold", "mechanism", "parameter"} and labels:
+        total += 0.03
+        labels.append("intent_table_numeric_bias")
+    return min(0.2, total), labels
+
+
+def _needs_neighbor_expansion(query: str, focus: str) -> bool:
+    q = query.lower()
+    if focus in {"threshold", "mechanism", "parameter"}:
+        return True
+    return any(
+        t in q
+        for t in ("threshold", "trigger", "when", "signal", "confidence", "uncertainty")
+    )
 
 
 @dataclass
@@ -128,6 +187,12 @@ class ScoredSentence:
     definition_labels: list[str] = field(default_factory=list)
     query_type_boost: float = 0.0
     query_type_tags: list[str] = field(default_factory=list)
+    exact_match_boost: float = 0.0
+    exact_match_labels: list[str] = field(default_factory=list)
+    table_boost: float = 0.0
+    table_boost_labels: list[str] = field(default_factory=list)
+    sentence_index: int = -1
+    neighbor_role: str = "core"
     final_score: float = 0.0
     chunk_id: str = ""
     page_display: str = "?"
@@ -143,13 +208,14 @@ def score_sentences_for_query(
     Split chunk texts into sentences, cross-encode rerank, apply pattern / query-type boosts.
     """
     focus = _detect_evidence_focus(query)
-    candidates: list[tuple[str, str, str, str]] = []  # sentence, chunk_id, page, source_file
+    candidates: list[tuple[str, str, str, str, int]] = []  # sentence, chunk_id, page, source_file, sent_index
     for ch in chunks:
         page = str(ch.page_number) if getattr(ch, "page_number", None) is not None else "?"
         sid = getattr(ch, "chunk_id", "")
         src = getattr(ch, "source_file", "")
-        for sent in split_into_sentences(ch.content):
-            candidates.append((sent, sid, page, src))
+        chunk_sentences = split_into_sentences(ch.content)
+        for idx, sent in enumerate(chunk_sentences):
+            candidates.append((sent, sid, page, src, idx))
 
     if not candidates:
         return [], {"focus": focus, "sentence_count": 0}
@@ -161,11 +227,13 @@ def score_sentences_for_query(
         raw_scores.append(0.0)
 
     scored: list[ScoredSentence] = []
-    for (sent, sid, page, src), rs in zip(candidates, raw_scores):
+    for (sent, sid, page, src, sent_idx), rs in zip(candidates, raw_scores):
         sl = sent.lower()
         d_boost, d_labels = _definition_boost(sl)
         qt_boost, qt_tags = _content_type_boost(sl, focus)
-        combined = min(1.0, float(rs) * 0.62 + d_boost + qt_boost)
+        em_boost, em_labels = _exact_entity_boost(sent, query)
+        tb_boost, tb_labels = _table_aware_boost(sent, focus)
+        combined = min(1.0, float(rs) * 0.54 + d_boost + qt_boost + em_boost + tb_boost)
         scored.append(
             ScoredSentence(
                 text=sent,
@@ -174,6 +242,11 @@ def score_sentences_for_query(
                 definition_labels=d_labels,
                 query_type_boost=qt_boost,
                 query_type_tags=qt_tags,
+                exact_match_boost=em_boost,
+                exact_match_labels=em_labels,
+                table_boost=tb_boost,
+                table_boost_labels=tb_labels,
+                sentence_index=sent_idx,
                 final_score=combined,
                 chunk_id=sid,
                 page_display=page,
@@ -187,8 +260,83 @@ def score_sentences_for_query(
         "focus": focus,
         "sentence_count": len(scored),
         "definition_pattern_hits": sum(1 for s in scored if s.definition_labels),
+        "exact_entity_boost_hits": sum(1 for s in scored if s.exact_match_labels),
+        "table_aware_boost_hits": sum(1 for s in scored if s.table_boost_labels),
+        "neighbor_expansion_intent": _needs_neighbor_expansion(query, focus),
     }
     return scored, debug
+
+
+def expand_with_neighbor_sentences(
+    query: str,
+    focus: str,
+    packed: list[ScoredSentence],
+    chunks: list[Any],
+) -> tuple[list[ScoredSentence], list[dict[str, Any]]]:
+    if not packed or not _needs_neighbor_expansion(query, focus):
+        return packed, []
+
+    chunk_sentence_lookup: dict[str, list[str]] = {}
+    for ch in chunks:
+        chunk_sentence_lookup[getattr(ch, "chunk_id", "")] = split_into_sentences(ch.content)
+
+    expanded: list[ScoredSentence] = []
+    seen: set[tuple[str, str]] = set()
+    windows: list[dict[str, Any]] = []
+
+    for core in packed:
+        key = (core.chunk_id, core.text)
+        if key not in seen:
+            expanded.append(core)
+            seen.add(key)
+
+        chunk_sentences = chunk_sentence_lookup.get(core.chunk_id, [])
+        if not chunk_sentences:
+            windows.append({"core": core.text, "neighbors_added": []})
+            continue
+
+        core_idx = core.sentence_index
+        if core_idx < 0 or core_idx >= len(chunk_sentences):
+            try:
+                core_idx = chunk_sentences.index(core.text)
+            except ValueError:
+                windows.append({"core": core.text, "neighbors_added": []})
+                continue
+
+        added_neighbors: list[str] = []
+        for offset, role in ((-1, "prev"), (1, "next")):
+            n_idx = core_idx + offset
+            if n_idx < 0 or n_idx >= len(chunk_sentences):
+                continue
+            n_text = chunk_sentences[n_idx]
+            n_key = (core.chunk_id, n_text)
+            if n_key in seen:
+                continue
+            neighbor = ScoredSentence(
+                text=n_text,
+                rerank_score=max(0.0, core.rerank_score * 0.90),
+                definition_boost=core.definition_boost * 0.25,
+                definition_labels=[],
+                query_type_boost=core.query_type_boost * 0.25,
+                query_type_tags=[*core.query_type_tags, f"neighbor_{role}"],
+                exact_match_boost=0.0,
+                exact_match_labels=[],
+                table_boost=core.table_boost * 0.25,
+                table_boost_labels=[],
+                sentence_index=n_idx,
+                neighbor_role=role,
+                final_score=max(0.0, core.final_score * 0.84),
+                chunk_id=core.chunk_id,
+                page_display=core.page_display,
+                source_file=core.source_file,
+            )
+            expanded.append(neighbor)
+            seen.add(n_key)
+            added_neighbors.append(n_text)
+
+        windows.append({"core": core.text, "neighbors_added": added_neighbors})
+
+    return expanded, windows
 
 
 def dedupe_sentences(scored: list[ScoredSentence]) -> list[ScoredSentence]:
@@ -259,6 +407,12 @@ def pack_evidence_sentences(
                 definition_labels=s.definition_labels,
                 query_type_boost=s.query_type_boost,
                 query_type_tags=s.query_type_tags,
+                exact_match_boost=s.exact_match_boost,
+                exact_match_labels=s.exact_match_labels,
+                table_boost=s.table_boost,
+                table_boost_labels=s.table_boost_labels,
+                sentence_index=s.sentence_index,
+                neighbor_role=s.neighbor_role,
                 final_score=s.final_score,
                 chunk_id=s.chunk_id,
                 page_display=s.page_display,

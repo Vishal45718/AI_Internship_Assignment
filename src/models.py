@@ -78,6 +78,9 @@ class ChunkMetadata(BaseModel):
     parent_id: str = Field(default="", description="Parent document or section ID.")
     document_name: str = Field(default="", description="Name of the document.")
     section_title: str = Field(default="", description="Section or parent title.")
+    subsection_title: str = Field(default="", description="Subsection title when available.")
+    heading_path: str = Field(default="", description="Heading hierarchy path.")
+    section_index: int = Field(default=0, description="Section order in document.")
 
     def to_chroma_dict(self) -> dict[str, Any]:
         """Flatten metadata for ChromaDB (values must be str/int/float/bool)."""
@@ -92,6 +95,9 @@ class ChunkMetadata(BaseModel):
             "parent_id": self.parent_id,
             "document_name": self.document_name,
             "section_title": self.section_title,
+            "subsection_title": self.subsection_title,
+            "heading_path": self.heading_path,
+            "section_index": self.section_index,
         }
         if self.page_number is not None:
             d["page_number"] = self.page_number
@@ -120,6 +126,9 @@ class RetrievedChunk(BaseModel):
     parent_id: str = ""
     document_name: str = ""
     section_title: str = ""
+    subsection_title: str = ""
+    heading_path: str = ""
+    section_index: int = 0
     retrieval_score: float = Field(default=0.0, ge=0.0, le=1.0)
     rerank_score: float = Field(default=0.0, ge=0.0, le=1.0)
     similarity_score: float = Field(ge=0.0, le=1.0)

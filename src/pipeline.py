@@ -23,6 +23,7 @@ from src.retrieval.retriever import SemanticRetriever
 from src.retrieval.sentence_evidence import (
     compress_scored_sentences,
     dedupe_sentences,
+    expand_with_neighbor_sentences,
     format_sentence_evidence_blocks,
     pack_evidence_sentences,
     score_sentences_for_query,
@@ -41,6 +42,7 @@ from src.llm.grounding import (
     validate_post_generation,
     STRICT_REGENERATION_SYSTEM_SUFFIX,
     build_retrieval_corpus,
+    prune_unsupported_answer_sentences,
 )
 from src.config import get_settings
 
@@ -238,6 +240,9 @@ class RAGPipeline:
             self._settings.rerank_score_threshold,
         )
         grounding_triggers: list[dict[str, Any]] = []
+        print(f"[grounding] evidence_confidence: {pre_debug.get('evidence_confidence')}")
+        print(f"[grounding] accepted_partial_evidence: {pre_debug.get('accepted_partial_evidence')}")
+        print(f"[grounding] rejection_reason: {block_reasons}")
         if not allow_llm:
             grounding_triggers.append({"type": "pre_generation_insufficient", "reasons": block_reasons})
             self._print_grounding_report(
@@ -249,7 +254,7 @@ class RAGPipeline:
                 sentence_meta=sentence_meta,
             )
             return {
-                "answer": INSUFFICIENT_DOCUMENT_EVIDENCE,
+                "answer": self._grounded_limitation_answer(pre_debug, had_any_evidence=bool(chunks_for_llm)),
                 "sources": self._dedupe_sources(chunks_for_llm),
                 "status": "insufficient_evidence",
                 "confidence": 0.0,
@@ -260,6 +265,13 @@ class RAGPipeline:
                     "triggers": grounding_triggers,
                 },
             }
+        evidence_confidence = pre_debug.get("evidence_confidence", "moderate")
+        if evidence_confidence == "moderate":
+            user_message += (
+                "\n\nCautious synthesis mode:\n"
+                "- The retrieved evidence suggests / the paper indicates / the retrieved section mentions.\n"
+                "- Details are partially described; avoid unsupported numeric thresholds or acronym expansions.\n"
+            )
 
         token_breakdown = self._prompt_token_breakdown(
             system_prompt=system_prompt,
@@ -330,9 +342,25 @@ class RAGPipeline:
                     "is_insufficient_disclaimer": True,
                 }
 
-        if not post_val.get("ok") and not post_val.get("is_insufficient_disclaimer"):
+        if (
+            not post_val.get("ok")
+            and not post_val.get("is_insufficient_disclaimer")
+            and evidence_confidence == "weak"
+        ):
             grounding_triggers.append({"type": "post_generation_unsupported", "validation": post_val})
-            answer = INSUFFICIENT_DOCUMENT_EVIDENCE
+            answer = self._grounded_limitation_answer(pre_debug, had_any_evidence=bool(chunks_for_llm))
+        else:
+            cleaned_answer, removed_sentences = prune_unsupported_answer_sentences(answer, corpus_plain)
+            if removed_sentences:
+                grounding_triggers.append(
+                    {
+                        "type": "sentence_pruning_applied",
+                        "removed_count": len(removed_sentences),
+                        "removed": removed_sentences[:6],
+                    }
+                )
+            answer = cleaned_answer or self._grounded_limitation_answer(pre_debug, had_any_evidence=bool(chunks_for_llm))
+        answer = self._polish_grounded_answer(answer)
 
         sources = self._dedupe_sources(chunks_for_llm)
         self._print_grounding_report(
@@ -352,6 +380,7 @@ class RAGPipeline:
             "grounding": {
                 "pre_generation": pre_debug,
                 "post_generation": post_val,
+                "evidence_confidence": evidence_confidence,
                 "regenerated": regenerated,
                 "regeneration_attempts": regeneration_attempts,
                 "sentence_evidence": sentence_meta,
@@ -421,6 +450,9 @@ class RAGPipeline:
             self._settings.rerank_score_threshold,
         )
         grounding_triggers: list[dict[str, Any]] = []
+        print(f"[stream][grounding] evidence_confidence: {pre_debug.get('evidence_confidence')}")
+        print(f"[stream][grounding] accepted_partial_evidence: {pre_debug.get('accepted_partial_evidence')}")
+        print(f"[stream][grounding] rejection_reason: {block_reasons}")
         if not allow_llm:
             grounding_triggers.append({"type": "pre_generation_insufficient", "reasons": block_reasons})
             self._print_grounding_report(
@@ -433,8 +465,15 @@ class RAGPipeline:
                 prefix="[stream] ",
             )
             yield "sources", self._dedupe_sources(chunks_for_llm)
-            yield "token", INSUFFICIENT_DOCUMENT_EVIDENCE
+            yield "token", self._grounded_limitation_answer(pre_debug, had_any_evidence=bool(chunks_for_llm))
             return
+        evidence_confidence = pre_debug.get("evidence_confidence", "moderate")
+        if evidence_confidence == "moderate":
+            user_message += (
+                "\n\nCautious synthesis mode:\n"
+                "- The retrieved evidence suggests / the paper indicates / the retrieved section mentions.\n"
+                "- Details are partially described; avoid unsupported numeric thresholds or acronym expansions.\n"
+            )
 
         sources = self._dedupe_sources(chunks_for_llm)
         yield "sources", sources
@@ -502,9 +541,25 @@ class RAGPipeline:
                     "is_insufficient_disclaimer": True,
                 }
 
-        if not post_val.get("ok") and not post_val.get("is_insufficient_disclaimer"):
+        if (
+            not post_val.get("ok")
+            and not post_val.get("is_insufficient_disclaimer")
+            and evidence_confidence == "weak"
+        ):
             grounding_triggers.append({"type": "post_generation_unsupported", "validation": post_val})
-            answer = INSUFFICIENT_DOCUMENT_EVIDENCE
+            answer = self._grounded_limitation_answer(pre_debug, had_any_evidence=bool(chunks_for_llm))
+        else:
+            cleaned_answer, removed_sentences = prune_unsupported_answer_sentences(answer, corpus_plain)
+            if removed_sentences:
+                grounding_triggers.append(
+                    {
+                        "type": "sentence_pruning_applied",
+                        "removed_count": len(removed_sentences),
+                        "removed": removed_sentences[:6],
+                    }
+                )
+            answer = cleaned_answer or self._grounded_limitation_answer(pre_debug, had_any_evidence=bool(chunks_for_llm))
+        answer = self._polish_grounded_answer(answer)
 
         self._print_grounding_report(
             chunks_for_llm,
@@ -544,13 +599,33 @@ class RAGPipeline:
             print(f"{prefix}[grounding] sentence_evidence_mode: {sentence_meta.get('mode')} focus={sentence_meta.get('focus')}")
             sel = sentence_meta.get("selected") or []
             print(f"{prefix}[grounding] selected_evidence_sentences ({len(sel)}): {sel}")
+            rej = sentence_meta.get("rejected") or []
+            print(f"{prefix}[grounding] rejected_evidence_sentences ({len(rej)}): {rej}")
             print(
                 f"{prefix}[grounding] definition_pattern_boost_hits: "
                 f"{sentence_meta.get('definition_pattern_hits')} sentence_count={sentence_meta.get('sentence_count')}"
             )
+            print(
+                f"{prefix}[grounding] exact_entity_boost_hits: "
+                f"{sentence_meta.get('exact_entity_boost_hits')}"
+            )
+            print(
+                f"{prefix}[grounding] table_aware_boost_hits: "
+                f"{sentence_meta.get('table_aware_boost_hits')}"
+            )
+            windows = sentence_meta.get("evidence_windows") or []
+            print(f"{prefix}[grounding] evidence_windows ({len(windows)}): {windows}")
+            print(
+                f"{prefix}[grounding] final_evidence_block: "
+                f"{sentence_meta.get('final_evidence_block')}"
+            )
         print(f"{prefix}[grounding] regeneration_attempts: {regeneration_attempts}")
         print(f"{prefix}[grounding] grounding_confidence: {grounding_confidence:.3f}")
         if post_validation is not None:
+            print(
+                f"{prefix}[grounding] synthesis_confidence: "
+                f"{post_validation.get('synthesis_confidence')}"
+            )
             print(
                 f"{prefix}[grounding] unsupported_generated_terms: {post_validation.get('unsupported_terms')}"
             )
@@ -583,9 +658,17 @@ class RAGPipeline:
         max_chars = max(120, int(self._settings.max_context_tokens * 3) - 180)
         scored, dbg = score_sentences_for_query(question, chunks, self._retriever._reranker)
         scored = dedupe_sentences(scored)
-        scored = compress_scored_sentences(scored)
-        dbg["compressed_sentence_count"] = len(scored)
-        packed, corpus = pack_evidence_sentences(scored, max_chars, max_sentences=2, max_sentence_chars=180)
+        compressed = compress_scored_sentences(scored)
+        dbg["compressed_sentence_count"] = len(compressed)
+        packed_core, _ = pack_evidence_sentences(compressed, max_chars, max_sentences=3, max_sentence_chars=220)
+        focus = str(dbg.get("focus", "general"))
+        packed_expanded, windows = expand_with_neighbor_sentences(question, focus, packed_core, chunks)
+        packed, corpus = pack_evidence_sentences(
+            packed_expanded,
+            max_chars,
+            max_sentences=5 if focus in {"threshold", "mechanism", "parameter"} else 4,
+            max_sentence_chars=220,
+        )
 
         if not packed:
             fb = self._format_chunk_evidence_fallback(chunks)
@@ -594,8 +677,10 @@ class RAGPipeline:
                 **dbg,
                 "mode": "chunk_fallback",
                 "packed_count": 0,
-                "dropped_sentence_count": len(scored),
+                "dropped_sentence_count": len(compressed),
                 "selected": [],
+                "rejected": [],
+                "evidence_windows": [],
             }
 
         blocks = format_sentence_evidence_blocks(packed)
@@ -603,7 +688,8 @@ class RAGPipeline:
             **dbg,
             "mode": "sentence",
             "packed_count": len(packed),
-            "dropped_sentence_count": max(0, len(scored) - len(packed)),
+            "dropped_sentence_count": max(0, len(compressed) - len(packed)),
+            "core_packed_count": len(packed_core),
             "selected": [
                 {
                     "preview": (p.text[:160] + "…") if len(p.text) > 160 else p.text,
@@ -613,11 +699,33 @@ class RAGPipeline:
                     "definition_pattern_labels": p.definition_labels,
                     "query_type_boost": round(p.query_type_boost, 4),
                     "query_type_tags": p.query_type_tags,
+                    "exact_match_boost": round(p.exact_match_boost, 4),
+                    "exact_match_labels": p.exact_match_labels,
+                    "table_boost": round(p.table_boost, 4),
+                    "table_boost_labels": p.table_boost_labels,
+                    "neighbor_role": p.neighbor_role,
                     "page": p.page_display,
                     "chunk_id": p.chunk_id,
                 }
                 for p in packed
             ],
+            "rejected": [
+                {
+                    "preview": (r.text[:160] + "…") if len(r.text) > 160 else r.text,
+                    "sentence_rerank_score": round(r.rerank_score, 4),
+                    "final_score": round(r.final_score, 4),
+                    "definition_pattern_labels": r.definition_labels,
+                    "query_type_tags": r.query_type_tags,
+                    "exact_match_labels": r.exact_match_labels,
+                    "table_boost_labels": r.table_boost_labels,
+                    "page": r.page_display,
+                    "chunk_id": r.chunk_id,
+                }
+                for r in compressed
+                if all(r.text != p.text for p in packed)
+            ][:8],
+            "evidence_windows": windows,
+            "final_evidence_block": blocks,
         }
         return blocks, corpus, meta
 
@@ -645,8 +753,8 @@ class RAGPipeline:
         return "\n\n".join(formatted)
 
     def _compute_safe_max_tokens(self, estimated_prompt_tokens: int) -> int:
-        """Hard cap completion tokens for free-tier compatibility."""
-        return max(32, min(32, self._settings.llm_max_output_tokens))
+        """Hard cap completion tokens using lightweight generation defaults."""
+        return max(32, min(64, self._settings.llm_max_output_tokens))
 
     @staticmethod
     def _log_token_budget(
@@ -852,6 +960,40 @@ class RAGPipeline:
         for item in top_sources:
             item.pop("_score", None)
         return top_sources
+
+    @staticmethod
+    def _grounded_limitation_answer(pre_debug: dict[str, Any], had_any_evidence: bool) -> str:
+        reasons = pre_debug.get("missing_required_entities") or []
+        if reasons:
+            return "The paper does not explicitly define this for the referenced method."
+        if had_any_evidence:
+            if pre_debug.get("explanatory_sentences"):
+                return "The retrieved section only partially describes this mechanism."
+            return "The document mentions the concept but does not provide exact values."
+        return INSUFFICIENT_DOCUMENT_EVIDENCE
+
+    @staticmethod
+    def _polish_grounded_answer(answer: str) -> str:
+        text = " ".join(answer.split())
+        if not text:
+            return text
+        # Prevent repetitive fallback phrasing in a single response.
+        replacements = (
+            "the retrieved documents",
+            "retrieved documents",
+        )
+        lowered = text.lower()
+        if lowered.count("not enough information") > 1:
+            first = lowered.find("not enough information")
+            second = lowered.find("not enough information", first + 1)
+            if second != -1:
+                text = text[:second].rstrip(" .;,:") + "."
+        for phrase in replacements:
+            if lowered.count(phrase) > 1:
+                text = text.replace("The retrieved documents", "The paper")
+                text = text.replace("retrieved documents", "paper")
+                break
+        return text
 
     # ── Index management ──────────────────────────────────────────────────────
 
