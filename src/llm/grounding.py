@@ -273,6 +273,43 @@ def _is_insufficient_disclaimer(answer: str) -> bool:
     return any(m in low for m in _DISCLAIMER_MARKERS)
 
 
+def evidence_overlap_score(answer: str, evidence_corpus: str) -> tuple[float, list[str]]:
+    """
+    Fraction of salient answer phrases (nouns + bigrams) that appear in retrieved evidence.
+    Low overlap suggests generic generation vs. paper-specific evidence.
+    """
+    corpus_n = _normalize_corpus(evidence_corpus)
+    stripped = answer.strip()
+    if _is_insufficient_disclaimer(stripped):
+        return 1.0, []
+
+    phrases = extract_key_noun_phrases(stripped)[:18]
+    sig_long = [t for t in _significant_tokens(stripped) if len(t) >= 5][:22]
+    checks: list[str] = []
+    seen: set[str] = set()
+    for c in phrases + sig_long:
+        k = c.lower()
+        if k not in seen:
+            seen.add(k)
+            checks.append(c)
+    if not checks:
+        return 0.55, []
+
+    matched = 0
+    missing: list[str] = []
+    for c in checks:
+        ck = c.lower()
+        if ck in corpus_n or re.search(rf"\b{re.escape(ck)}\b", corpus_n):
+            matched += 1
+        elif _phrase_fuzzy_in_corpus(c, corpus_n):
+            matched += 1
+        else:
+            missing.append(c)
+
+    ratio = matched / len(checks)
+    return ratio, missing[:12]
+
+
 def validate_post_generation(
     answer: str,
     question: str,
@@ -281,7 +318,7 @@ def validate_post_generation(
 ) -> dict[str, Any]:
     """
     Evidence verification after generation: unsupported terms, noun phrases,
-    known hallucination strings, acronym expansions.
+    known hallucination strings, acronym expansions, evidence overlap.
     """
     corpus_n = _normalize_corpus(corpus)
     stripped = answer.strip()
@@ -295,6 +332,8 @@ def validate_post_generation(
             "hallucination_triggers": [],
             "protected_violations": [],
             "unsupported_ratio": 0.0,
+            "evidence_overlap_ratio": 1.0,
+            "evidence_overlap_missing": [],
             "regenerate": False,
             "is_insufficient_disclaimer": True,
         }
@@ -304,11 +343,13 @@ def validate_post_generation(
     noun_bad = unsupported_noun_phrases(stripped, corpus_n)
     halluc_triggers = detect_known_hallucination_phrases(stripped, corpus_n)
     prot_viol = protected_acronym_expansion_violation(stripped, question, corpus)
+    overlap_ratio, overlap_missing = evidence_overlap_score(stripped, corpus)
 
     ratio = (len(unsupported) / len(sig)) if sig else 0.0
     unsupported_cap = [t for t in unsupported if t[:1].isupper() or any(c.isupper() for c in t)]
     large_claim = ratio > 0.38 or len(unsupported_cap) >= 4
     noun_fail = len(noun_bad) >= 5
+    overlap_fail = overlap_ratio < 0.28 and len(sig) >= 5
 
     ok = (
         ratio <= 0.42
@@ -316,14 +357,25 @@ def validate_post_generation(
         and not large_claim
         and not halluc_triggers
         and not noun_fail
+        and not overlap_fail
     )
-    confidence = max(0.0, min(1.0, (1.0 - ratio) * (0.55 + 0.45 * min(1.0, top_score))))
+    confidence = max(
+        0.0,
+        min(
+            1.0,
+            (1.0 - ratio)
+            * (0.55 + 0.45 * min(1.0, top_score))
+            * (0.45 + 0.55 * overlap_ratio),
+        ),
+    )
 
     regenerate = (
         (not ok)
         or bool(prot_viol)
         or bool(halluc_triggers)
         or (ratio > 0.30 and len(unsupported) >= 3)
+        or overlap_fail
+        or (overlap_ratio < 0.34 and len(sig) >= 8)
     )
 
     return {
@@ -334,6 +386,8 @@ def validate_post_generation(
         "hallucination_triggers": halluc_triggers,
         "protected_violations": prot_viol,
         "unsupported_ratio": round(ratio, 3),
+        "evidence_overlap_ratio": round(overlap_ratio, 3),
+        "evidence_overlap_missing": overlap_missing,
         "regenerate": regenerate,
         "is_insufficient_disclaimer": False,
     }
@@ -341,7 +395,7 @@ def validate_post_generation(
 
 STRICT_REGENERATION_SYSTEM_SUFFIX = (
     "\n\nREGENERATION: Answer only from explicit evidence in the Retrieved Evidence section. "
-    "Do not use outside knowledge. Quote or closely paraphrase only text inside the evidence quotes. "
-    "If you cannot support every claim from that evidence, reply exactly with: "
+    "Do not use outside knowledge or generic ML explanations. Quote or tightly paraphrase only "
+    "sentences shown in evidence. If overlap with evidence would be weak, reply exactly with: "
     '"The retrieved documents do not contain enough information."'
 )
