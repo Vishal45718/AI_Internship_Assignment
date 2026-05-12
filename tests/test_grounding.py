@@ -33,11 +33,11 @@ class GroundingTests(unittest.TestCase):
             rerank_score_threshold=0.2,
         )
         self.assertFalse(ok)
-        self.assertTrue(any("protected_acronym_not_in_context" in r for r in reasons))
+        self.assertTrue(any("required_entity_missing_in_evidence" in r for r in reasons))
 
     def test_post_generation_accepts_disclaimer(self) -> None:
         ctx = "SeaKR computes uncertainty from internal states."
-        ans = "The retrieved documents do not contain enough information to answer confidently."
+        ans = "The retrieved documents do not contain enough information."
         v = validate_post_generation(ans, "Explain SeaKR", ctx, 0.8)
         self.assertTrue(v["ok"])
         self.assertTrue(v["is_insufficient_disclaimer"])
@@ -51,6 +51,7 @@ class GroundingTests(unittest.TestCase):
         v = validate_post_generation(ans, "What is SeaKR?", ctx, 0.8)
         self.assertFalse(v["ok"])
         self.assertTrue(v["regenerate"])
+        self.assertTrue(any("kernel regularization" in t for t in v.get("hallucination_triggers", [])))
 
 
 if __name__ == "__main__":
