@@ -33,12 +33,12 @@ class BaseLLMClient(ABC):
     """Interface for all LLM providers."""
 
     @abstractmethod
-    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
+    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None) -> str:
         """Generate a response from the LLM."""
         ...
 
     @abstractmethod
-    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None):
+    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None):
         """Stream a response from the LLM. Yields text chunks."""
         ...
 
@@ -71,12 +71,15 @@ class OpenAIClient(BaseLLMClient):
         self._max_output_tokens = settings.llm_max_output_tokens
         logger.info("OpenAI client ready: model=%s max_output_tokens=%s", self._model, self._max_output_tokens)
 
-    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
+    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None) -> str:
         last_error: Exception | None = None
         messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_message})
+        
+        # Use provided max_tokens or fall back to config
+        output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
 
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
@@ -84,7 +87,7 @@ class OpenAIClient(BaseLLMClient):
                     model=self._model,
                     messages=messages,
                     temperature=0.1,  # Low = more grounded, less creative
-                    max_tokens=self._max_output_tokens,
+                    max_tokens=output_tokens,
                 )
                 return response.choices[0].message.content or ""
             except Exception as exc:
@@ -99,18 +102,21 @@ class OpenAIClient(BaseLLMClient):
                     time.sleep(_RETRY_DELAY * attempt)
         raise LLMError(f"OpenAI failed after {_MAX_RETRIES} attempts: {last_error}")
 
-    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None):
+    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None):
         messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_message})
+        
+        # Use provided max_tokens or fall back to config
+        output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
 
         try:
             response = self._client.chat.completions.create(
                 model=self._model,
                 messages=messages,
                 temperature=0.1,
-                max_tokens=self._max_output_tokens,
+                max_tokens=output_tokens,
                 stream=True,
             )
             for chunk in response:
@@ -157,9 +163,13 @@ class GeminiClient(BaseLLMClient):
             self._max_output_tokens,
         )
 
-    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
+    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None) -> str:
         combined = f"{system_prompt}\n\nUser question: {user_message}"
         last_error: Exception | None = None
+        
+        # Use provided max_tokens or fall back to config
+        output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
+        
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 response = self._client.models.generate_content(
@@ -167,7 +177,7 @@ class GeminiClient(BaseLLMClient):
                     contents=combined,
                     config=self._genai.types.GenerateContentConfig(
                         temperature=0.1,
-                        max_output_tokens=self._max_output_tokens,
+                        max_output_tokens=output_tokens,
                     ),
                 )
                 return response.text or ""
@@ -182,15 +192,19 @@ class GeminiClient(BaseLLMClient):
                     time.sleep(_RETRY_DELAY)
         raise LLMError(f"Gemini failed after {_MAX_RETRIES} attempts: {last_error}")
 
-    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None):
+    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None):
         combined = f"{system_prompt}\n\nUser question: {user_message}"
+        
+        # Use provided max_tokens or fall back to config
+        output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
+        
         try:
             response = self._client.models.generate_content_stream(
                 model=self._model_name,
                 contents=combined,
                 config=self._genai.types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=self._max_output_tokens,
+                    max_output_tokens=output_tokens,
                 ),
             )
             for chunk in response:
@@ -228,7 +242,7 @@ class OllamaClient(BaseLLMClient):
         self._model_id = settings.ollama_model
         logger.info("Ollama client ready: model=%s url=%s", self._model_id, self._base_url)
 
-    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
+    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None) -> str:
         messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
@@ -254,7 +268,7 @@ class OllamaClient(BaseLLMClient):
                     time.sleep(_RETRY_DELAY)
         raise LLMError(f"Ollama failed after {_MAX_RETRIES} attempts: {last_error}")
 
-    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None):
+    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None):
         import json
         messages = [{"role": "system", "content": system_prompt}]
         if history:
@@ -336,23 +350,27 @@ class OpenRouterClient(BaseLLMClient):
             self._max_output_tokens,
         )
 
-    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None) -> str:
+    def generate(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None) -> str:
         messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_message})
+        
+        # Use provided max_tokens or fall back to config
+        output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
+        logger.debug("OpenRouter generate: using max_tokens=%d", output_tokens)
 
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 logger.debug(
                     "OpenRouter chat.completions max_tokens=%s",
-                    self._max_output_tokens,
+                    output_tokens,
                 )
                 response = self._client.chat.completions.create(
                     model=self._model,
                     messages=messages,
                     temperature=0.1,
-                    max_tokens=self._max_output_tokens,
+                    max_tokens=output_tokens,
                 )
                 return response.choices[0].message.content or ""
             except Exception as exc:
@@ -373,22 +391,26 @@ class OpenRouterClient(BaseLLMClient):
                     time.sleep(_RETRY_DELAY)
         raise LLMError(f"OpenRouter failed after {_MAX_RETRIES} attempts")
 
-    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None):
+    def stream(self, system_prompt: str, user_message: str, history: list[dict[str, str]] | None = None, max_tokens: int | None = None):
         messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_message})
+        
+        # Use provided max_tokens or fall back to config
+        output_tokens = max_tokens if max_tokens is not None else self._max_output_tokens
+        logger.debug("OpenRouter stream: using max_tokens=%d", output_tokens)
 
         try:
             logger.debug(
                 "OpenRouter streaming chat.completions max_tokens=%s",
-                self._max_output_tokens,
+                output_tokens,
             )
             response = self._client.chat.completions.create(
                 model=self._model,
                 messages=messages,
                 temperature=0.1,
-                max_tokens=self._max_output_tokens,
+                max_tokens=output_tokens,
                 stream=True,
             )
             for chunk in response:
