@@ -5,7 +5,9 @@ A technical Retrieval-Augmented Generation (RAG) system for question answering o
 ## Project Overview
 
 This system ingests PDF, TXT, CSV, and Markdown documents, converts them into searchable chunks, stores embeddings in ChromaDB, and retrieves evidence for grounded responses. It is optimized for document-centered QA where source provenance and conservative answers are more important than open-ended chat.
+## Demo Video
 
+[Watch the Demo Video](https://youtu.be/8MmLtZjRXcY?si=Xbks8KaEhUB0GZcD)
 ## Features
 
 | Feature | Description |
