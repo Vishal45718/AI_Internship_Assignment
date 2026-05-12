@@ -26,6 +26,10 @@ from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+# Soft cap per chunk body when building LLM context (characters).
+_CONTEXT_CHUNK_BODY_MAX_CHARS = 1200
+
+
 class RAGPipeline:
     """
     Clean RAG pipeline for document Q&A.
@@ -184,15 +188,26 @@ class RAGPipeline:
                 "top_score": result.top_score,
             }
 
-        # Step 4: Build grounded prompt with source-labeled context
-        context_str = self._format_context(result.chunks)
+        # Step 4: Enforce prompt token budget (trim lowest-ranked chunks first)
+        chunks_for_llm = self._trim_chunks_for_prompt_budget(result.chunks, question, history)
+        context_str = self._format_context(chunks_for_llm)
         system_prompt = RAG_SYSTEM_PROMPT.format(context=context_str)
+        user_message = f"Question: {question}"
+        prompt_tokens = self._estimate_prompt_tokens(system_prompt, user_message, history)
+        print(f"Estimated prompt tokens: {prompt_tokens}")
+        print(f"Requested max_tokens: {self._settings.llm_max_output_tokens}")
+        logger.info(
+            "RAG prompt budget: estimated_prompt_tokens=%d max_output_tokens=%d context_chunks=%d",
+            prompt_tokens,
+            self._settings.llm_max_output_tokens,
+            len(chunks_for_llm),
+        )
 
         # Step 5: Generate answer from LLM
         try:
             answer = self._llm.generate(
                 system_prompt=system_prompt,
-                user_message=f"Question: {question}",
+                user_message=user_message,
                 history=history,
             )
         except Exception as exc:
@@ -204,7 +219,7 @@ class RAGPipeline:
             }
 
         # Step 6: Return answer with sources
-        sources = self._dedupe_sources(result.chunks)
+        sources = self._dedupe_sources(chunks_for_llm)
 
         return {
             "answer": answer,
@@ -242,14 +257,30 @@ class RAGPipeline:
             yield "token", FALLBACK_RESPONSE
             return
 
-        sources = self._dedupe_sources(result.chunks)
+        print(f"[stream] Retrieved chunk count: {result.retrieved_chunk_count}")
+        print(f"[stream] Reranked chunk count: {result.reranked_chunk_count}")
+        print(f"[stream] Expanded chunk count: {result.expanded_chunk_count}")
+        print(f"[stream] Final chunk count: {result.final_chunk_count}")
+
+        chunks_for_llm = self._trim_chunks_for_prompt_budget(result.chunks, question, history)
+        sources = self._dedupe_sources(chunks_for_llm)
         yield "sources", sources
 
-        context_str = self._format_context(result.chunks)
+        context_str = self._format_context(chunks_for_llm)
         system_prompt = RAG_SYSTEM_PROMPT.format(context=context_str)
+        user_message = f"Question: {question}"
+        prompt_tokens = self._estimate_prompt_tokens(system_prompt, user_message, history)
+        print(f"Estimated prompt tokens (stream): {prompt_tokens}")
+        print(f"Requested max_tokens (stream): {self._settings.llm_max_output_tokens}")
+        logger.info(
+            "RAG stream prompt budget: estimated_prompt_tokens=%d max_output_tokens=%d context_chunks=%d",
+            prompt_tokens,
+            self._settings.llm_max_output_tokens,
+            len(chunks_for_llm),
+        )
 
         try:
-            for token in self._llm.stream(system_prompt, f"Question: {question}", history):
+            for token in self._llm.stream(system_prompt, user_message, history):
                 yield "token", token
         except Exception as exc:
             logger.error("LLM streaming failed: %s", exc)
@@ -260,25 +291,76 @@ class RAGPipeline:
         if not chunks:
             return "(No relevant context was retrieved.)"
 
+        ordered = sorted(chunks, key=lambda c: (c.page_number or 0, c.chunk_index))
         formatted: list[str] = []
         total_chars = 0
+        max_context_chars = self._settings.max_context_tokens * 4
 
-        for chunk in chunks:
+        for chunk in ordered:
             score = chunk.rerank_score if chunk.rerank_score > 0 else chunk.similarity_score
             page_info = f", Page {chunk.page_number}" if chunk.page_number else ""
+            body = chunk.content
+            if len(body) > _CONTEXT_CHUNK_BODY_MAX_CHARS:
+                body = body[:_CONTEXT_CHUNK_BODY_MAX_CHARS] + "…"
             chunk_str = CONTEXT_CHUNK_TEMPLATE.format(
                 source_file=chunk.source_file,
                 page_info=page_info,
                 score=score,
-                content=chunk.content,
+                content=body,
             )
-            max_context_chars = self._settings.max_context_tokens * 4
             if total_chars + len(chunk_str) > max_context_chars:
                 break
             formatted.append(chunk_str)
             total_chars += len(chunk_str)
 
         return "\n\n".join(formatted)
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        if not text:
+            return 0
+        return max(1, len(text) // 4)
+
+    def _estimate_prompt_tokens(
+        self,
+        system_prompt: str,
+        user_message: str,
+        history: list[dict[str, str]] | None,
+    ) -> int:
+        total = self._estimate_tokens(system_prompt) + self._estimate_tokens(user_message)
+        if history:
+            for turn in history:
+                total += self._estimate_tokens(turn.get("content", ""))
+        return total
+
+    def _trim_chunks_for_prompt_budget(
+        self,
+        chunks: list,
+        question: str,
+        history: list[dict[str, str]] | None,
+    ) -> list:
+        """Remove lowest-ranked chunks first until the estimated prompt fits max_context_tokens."""
+        if not chunks:
+            return []
+
+        ranked = sorted(
+            chunks,
+            key=lambda c: (c.rerank_score if c.rerank_score > 0 else 0.0, c.similarity_score),
+            reverse=True,
+        )
+        working = list(ranked)
+        user_message = f"Question: {question}"
+        budget = self._settings.max_context_tokens
+
+        while working:
+            ordered = sorted(working, key=lambda c: (c.page_number or 0, c.chunk_index))
+            context_str = self._format_context(ordered)
+            system_prompt = RAG_SYSTEM_PROMPT.format(context=context_str)
+            if self._estimate_prompt_tokens(system_prompt, user_message, history) <= budget:
+                return ordered
+            working.pop()
+
+        return sorted(ranked[:1], key=lambda c: (c.page_number or 0, c.chunk_index))
 
     def _dedupe_sources(self, chunks: list) -> list[dict[str, Any]]:
         grouped: dict[tuple[str, int | None], Any] = {}

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter, defaultdict
 from typing import Any
 
 from src.models import RetrievedChunk, RetrievalResult
@@ -38,6 +39,150 @@ class SemanticRetriever:
         self._store = vector_store
         self._settings = get_settings()
         self._reranker = CrossEncoderReranker()
+
+    def _extract_query_entities(self, query: str) -> dict[str, Any]:
+        tokens = [t for t in re.findall(r"\w+", query) if t]
+        entities: list[str] = []
+        all_caps = {token for token in tokens if re.fullmatch(r"[A-Z]{2,}", token)}
+        camel_case = set(re.findall(r"\b(?:[A-Z][a-z]+[A-Z][A-Za-z]+|[a-z]+[A-Z][A-Za-z]+)\b", query))
+        quoted_phrases = re.findall(r'"([^"]+)"', query)
+        mixed_case = {token for token in tokens if any(c.isupper() for c in token[1:]) and not token.isupper()}
+
+        entities.extend(all_caps)
+        entities.extend(camel_case)
+        entities.extend(quoted_phrases)
+        entities.extend(mixed_case)
+
+        unique_entities = []
+        seen = set()
+        for entity in entities:
+            normalized = entity.strip()
+            if normalized and normalized not in seen:
+                unique_entities.append(normalized)
+                seen.add(normalized)
+
+        return {
+            "tokens": tokens,
+            "entities": unique_entities,
+            "acronym_entities": list(all_caps),
+            "mixed_case_entities": list(mixed_case),
+            "quoted_phrases": quoted_phrases,
+            "query_lower": query.lower(),
+        }
+
+    def _detect_query_type(self, query: str, entities: dict[str, Any]) -> str:
+        q_lower = query.lower()
+        is_comparison = "compare" in q_lower or " vs " in q_lower or " versus " in q_lower or "between" in q_lower
+        if is_comparison and len(entities["entities"]) >= 2:
+            return "comparison"
+        if any(token in q_lower for token in ("how", "mechanism", "process", "reformulate", "operate", "works", "methodology", "workflow")):
+            return "mechanism"
+        if any(token in q_lower for token in ("what is", "define", "meaning of", "describe")):
+            if entities["entities"]:
+                return "acronym_lookup"
+            return "definition"
+        if entities["acronym_entities"] or entities["mixed_case_entities"]:
+            return "acronym_lookup"
+        return "general"
+
+    def _adaptive_weights(self, query_type: str, entities: dict[str, Any]) -> tuple[float, float]:
+        if query_type == "acronym_lookup":
+            return 0.35, 0.65
+        if query_type == "comparison":
+            return 0.45, 0.55
+        if query_type == "mechanism":
+            return 0.55, 0.45
+        if query_type == "definition":
+            return 0.60, 0.40
+        if entities["acronym_entities"] or entities["mixed_case_entities"] or entities["quoted_phrases"]:
+            return 0.45, 0.55
+        return 0.65, 0.35
+
+    def _collect_rare_terms(self, query_tokens: list[str], candidates: list[RetrievedChunk]) -> list[str]:
+        if not query_tokens or not candidates:
+            return []
+        candidate_docs = [chunk.content.lower() for chunk in candidates]
+        corpus_size = len(candidate_docs)
+        df: Counter[str] = Counter()
+        for token in query_tokens:
+            pattern = re.compile(rf"\b{re.escape(token.lower())}\b")
+            df[token] = sum(1 for doc in candidate_docs if pattern.search(doc))
+
+        rare_tokens = [token for token, freq in df.items() if freq <= 2]
+        return rare_tokens
+
+    def _exact_entity_boost(self, chunk: RetrievedChunk, entities: dict[str, Any]) -> float:
+        if not entities["entities"]:
+            return 0.0
+
+        boost = 0.0
+        lowered_content = chunk.content
+        for entity in entities["entities"]:
+            pattern = re.compile(rf"\b{re.escape(entity)}\b", flags=re.IGNORECASE)
+            if pattern.search(lowered_content):
+                boost += 0.18 if entity in entities["acronym_entities"] or entity in entities["mixed_case_entities"] else 0.10
+            if chunk.section_title and pattern.search(chunk.section_title):
+                boost += 0.12
+
+        if entities.get("rare_terms"):
+            for token in entities["rare_terms"]:
+                if re.search(rf"\b{re.escape(token)}\b", lowered_content, flags=re.IGNORECASE):
+                    boost += 0.08
+        return min(0.75, boost)
+
+    def _section_title_boost(self, chunk: RetrievedChunk, entities: dict[str, Any]) -> float:
+        if not chunk.section_title or not entities["entities"]:
+            return 0.0
+        title = chunk.section_title
+        for entity in entities["entities"]:
+            if re.search(rf"\b{re.escape(entity)}\b", title, flags=re.IGNORECASE):
+                return 0.22
+        return 0.0
+
+    def _diversify_by_page(self, chunks: list[RetrievedChunk], max_per_page: int = 2) -> list[RetrievedChunk]:
+        page_counts: dict[int, int] = defaultdict(int)
+        selected: list[RetrievedChunk] = []
+        for chunk in chunks:
+            page = chunk.page_number if chunk.page_number is not None else -1
+            if page_counts[page] < max_per_page:
+                selected.append(chunk)
+                page_counts[page] += 1
+            else:
+                logger.info(
+                    "[Suppression] Skipped chunk %s: reason=page_limit page=%s",
+                    chunk.chunk_id,
+                    page,
+                )
+        return selected
+
+    def _build_query_features(
+        self,
+        query: str,
+        vector_chunks: list[RetrievedChunk],
+        keyword_chunks: list[RetrievedChunk] | None = None,
+    ) -> dict[str, Any]:
+        keyword_chunks = keyword_chunks or []
+        entities = self._extract_query_entities(query)
+        query_type = self._detect_query_type(query, entities)
+        semantic_weight, keyword_weight = self._adaptive_weights(query_type, entities)
+        rare_terms = self._collect_rare_terms(entities["tokens"], vector_chunks + keyword_chunks)
+        entities["rare_terms"] = rare_terms
+
+        logger.info(
+            "[Retrieval] Detected entities=%s query_type=%s weights=> semantic=%.2f keyword=%.2f rare_terms=%s",
+            entities["entities"],
+            query_type,
+            semantic_weight,
+            keyword_weight,
+            rare_terms,
+        )
+
+        return {
+            "entities": entities,
+            "query_type": query_type,
+            "semantic_weight": semantic_weight,
+            "keyword_weight": keyword_weight,
+        }
 
     def retrieve(
         self,
@@ -83,13 +228,14 @@ class SemanticRetriever:
                 top_k=k,
                 where=filters,
             )
-
-            merged_chunks = self._merge_hybrid_results(query, vector_chunks, keyword_chunks)
+            query_features = self._build_query_features(query, vector_chunks, keyword_chunks)
+            merged_chunks = self._merge_hybrid_results(query, vector_chunks, keyword_chunks, query_features)
             return self._strict_pipeline_result(
                 query=query,
                 candidates=merged_chunks,
                 retrieval_threshold=threshold,
                 expand_context=expand_context,
+                query_features=query_features,
             )
 
         raw_chunks: list[RetrievedChunk] = self._store.query(
@@ -97,12 +243,13 @@ class SemanticRetriever:
             top_k=k,
             where=filters,
         )
-
+        query_features = self._build_query_features(query, raw_chunks)
         return self._strict_pipeline_result(
             query=query,
             candidates=raw_chunks,
             retrieval_threshold=threshold,
             expand_context=expand_context,
+            query_features=query_features,
         )
 
     def _strict_pipeline_result(
@@ -111,6 +258,7 @@ class SemanticRetriever:
         candidates: list[RetrievedChunk],
         retrieval_threshold: float,
         expand_context: bool,
+        query_features: dict[str, Any],
     ) -> RetrievalResult:
         top_candidates = candidates[: self._settings.retrieval_top_k]
         for c in top_candidates:
@@ -129,7 +277,9 @@ class SemanticRetriever:
                 passed_threshold=False,
             )
 
-        reranked = self._rerank(query, filtered)[: self._settings.rerank_top_k]
+        reranked = self._rerank(query, filtered, query_features)
+        reranked = self._diversify_by_page(reranked)
+        reranked = reranked[: self._settings.rerank_top_k]
         reranked = [c for c in reranked if c.rerank_score >= self._settings.rerank_score_threshold]
         if not reranked:
             return RetrievalResult(
@@ -189,6 +339,7 @@ class SemanticRetriever:
         query: str,
         vector_chunks: list[RetrievedChunk],
         keyword_chunks: list[RetrievedChunk],
+        query_features: dict[str, Any],
     ) -> list[RetrievedChunk]:
         """Fuse vector similarity and keyword retrieval into a single ranked result set."""
         candidate_map: dict[str, dict[str, Any]] = {}
@@ -219,11 +370,21 @@ class SemanticRetriever:
 
         max_keyword_score = max((entry["keyword_score"] for entry in candidate_map.values()), default=1.0)
         fused_results: list[RetrievedChunk] = []
+        semantic_weight = query_features.get("semantic_weight", 0.65)
+        keyword_weight = query_features.get("keyword_weight", 0.35)
+
         for entry in candidate_map.values():
             vector_score = entry["vector_score"]
             keyword_score = entry["keyword_score"] / max_keyword_score if max_keyword_score > 0 else 0.0
-            exact_bonus = 0.35 if self._contains_exact_token(entry["chunk"].content, query) else 0.0
-            fused_score = min(1.0, vector_score * 0.30 + keyword_score * 0.35 + exact_bonus)
+            exact_bonus = self._exact_entity_boost(entry["chunk"], query_features["entities"])
+            section_boost = self._section_title_boost(entry["chunk"], query_features["entities"])
+            fused_score = min(
+                1.0,
+                vector_score * semantic_weight
+                + keyword_score * keyword_weight
+                + exact_bonus
+                + section_boost,
+            )
 
             fused_chunk = RetrievedChunk(
                 chunk_id=entry["chunk"].chunk_id,
@@ -241,6 +402,12 @@ class SemanticRetriever:
             fused_results.append(fused_chunk)
 
         fused_results.sort(key=lambda c: c.similarity_score, reverse=True)
+        logger.info(
+            "[Retrieval] Hybrid fusion computed scores for %d candidates. semantic_weight=%.2f keyword_weight=%.2f",
+            len(fused_results),
+            semantic_weight,
+            keyword_weight,
+        )
         return fused_results
 
     def _contains_exact_token(self, content: str, query: str) -> bool:
@@ -253,14 +420,30 @@ class SemanticRetriever:
                 return True
         return False
 
-    def _rerank(self, query: str, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    def _rerank(self, query: str, chunks: list[RetrievedChunk], query_features: dict[str, Any]) -> list[RetrievedChunk]:
         if not chunks:
             return []
         scores = self._reranker.score(query, [c.content for c in chunks])
         reranked: list[RetrievedChunk] = []
         for chunk, score in zip(chunks, scores):
-            chunk.rerank_score = max(0.0, min(1.0, float(score)))
+            base_score = max(0.0, min(1.0, float(score)))
+            entity_boost = self._exact_entity_boost(chunk, query_features["entities"])
+            section_boost = self._section_title_boost(chunk, query_features["entities"])
+            combined = min(
+                1.0,
+                base_score * 0.62 + chunk.retrieval_score * 0.28 + entity_boost + section_boost,
+            )
+            chunk.rerank_score = combined
             reranked.append(chunk)
+            logger.info(
+                "[Rerank] Chunk %s: bm25=%.3f semantic=%.3f exact_entity_boost=%.3f section_boost=%.3f final=%.3f",
+                chunk.chunk_id,
+                chunk.retrieval_score,
+                base_score,
+                entity_boost,
+                section_boost,
+                combined,
+            )
         reranked.sort(
             key=lambda c: (c.rerank_score, c.retrieval_score, c.similarity_score),
             reverse=True,
@@ -364,8 +547,10 @@ class SemanticRetriever:
         kept.sort(key=lambda c: rank_map.get(c.chunk_id, 0.0), reverse=True)
         kept = kept[: self._settings.final_context_chunks]
 
+        # Drop lowest-ranked chunks first until under token budget.
         while kept and self._estimate_token_count(kept) > self._settings.max_context_tokens:
-            kept.pop()
+            kept.sort(key=lambda c: rank_map.get(c.chunk_id, 0.0), reverse=True)
+            kept.pop()  # remove lowest rerank tail
         return kept
 
     def _estimate_token_count(self, chunks: list[RetrievedChunk]) -> int:
