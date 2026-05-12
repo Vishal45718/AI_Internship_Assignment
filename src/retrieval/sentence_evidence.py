@@ -208,9 +208,9 @@ def dedupe_sentences(scored: list[ScoredSentence]) -> list[ScoredSentence]:
 def compress_scored_sentences(
     scored: list[ScoredSentence],
     *,
-    min_final_score: float = 0.17,
-    min_rerank_score: float = 0.085,
-    max_candidates: int = 36,
+    min_final_score: float = 0.22,
+    min_rerank_score: float = 0.12,
+    max_candidates: int = 12,
 ) -> list[ScoredSentence]:
     """
     Remove low-scoring sentences before packing; keep explanatory-heavy candidates.
@@ -233,8 +233,8 @@ def compress_scored_sentences(
 def pack_evidence_sentences(
     scored: list[ScoredSentence],
     max_chars: int,
-    max_sentences: int = 8,
-    max_sentence_chars: int = 260,
+    max_sentences: int = 2,
+    max_sentence_chars: int = 180,
 ) -> tuple[list[ScoredSentence], str]:
     """Greedy pack highest-value explanatory sentences until character budget."""
     packed: list[ScoredSentence] = []
