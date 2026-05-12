@@ -6,26 +6,64 @@ can be tuned without touching pipeline logic.
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SYSTEM PROMPT — Grounding instruction for the LLM (hallucination prevention)
+# SYSTEM PROMPT — Strict grounded answering (instructions only; context is user message)
 # ─────────────────────────────────────────────────────────────────────────────
-RAG_SYSTEM_PROMPT = """\
-You are a research assistant answering strictly from retrieved context.
+RAG_SYSTEM_PROMPT = """You are a research assistant answering questions strictly from retrieved document context.
 
 Rules:
-- Use ONLY retrieved context.
-- If relevant context exists, NEVER say: "I could not find relevant information."
-- Prefer explanatory sentences over isolated mentions.
-- If answer is partially available, provide the partial answer.
-- Do not hallucinate missing details.
-- Prioritize: definitions, mechanisms, thresholds, methodology, comparisons.
-- Cite factual claims using source headers present in context.
 
-CONTEXT:
-{context}
-"""
+* Use ONLY the retrieved context.
+* Do NOT use outside/world knowledge.
+* If the answer is not clearly supported by retrieved context, say:
+  'The retrieved documents do not contain enough information to answer confidently.'
+* Never invent expansions for acronyms.
+* Never infer meanings from prior training knowledge.
+* Prefer direct explanations from retrieved text.
+* Quote or paraphrase retrieved content faithfully.
+* For queries mentioning SeaKR, ReAL, DRAGIN, FLARE, or CRAG: do not expand those labels unless the same wording appears in the retrieved context.
+
+Answering process:
+
+1. Identify relevant retrieved chunks.
+
+2. Extract supporting statements.
+
+3. Summarize only supported information.
+
+4. If evidence is weak, explicitly say so."""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FALLBACK RESPONSE — When retrieval confidence is below threshold
+# USER MESSAGE — Retrieved context is isolated from instructions
+# ─────────────────────────────────────────────────────────────────────────────
+ACRONYM_CONSTRAINTS_BLOCK = """=== ACRONYM CONSTRAINTS (mandatory) ===
+The question references one or more of: SeaKR, ReAL, DRAGIN, FLARE, CRAG.
+You MUST NOT spell out, expand, or reinterpret these labels unless the identical expansion or definition appears verbatim in the retrieved context above.
+
+"""
+
+RAG_USER_MESSAGE_TEMPLATE = """=== RETRIEVED DOCUMENT CONTEXT (answer ONLY from this section) ===
+{context}
+=== END RETRIEVED DOCUMENT CONTEXT ===
+
+{acronym_constraints_block}=== QUESTION ===
+{question}
+"""
+
+
+def build_rag_user_message(question: str, context: str) -> str:
+    """Compose the user turn: labeled context, optional acronym guardrails, then the question."""
+    from src.llm.grounding import protected_acronyms_in_query
+
+    block = ACRONYM_CONSTRAINTS_BLOCK if protected_acronyms_in_query(question) else ""
+    return RAG_USER_MESSAGE_TEMPLATE.format(
+        context=context,
+        acronym_constraints_block=block,
+        question=question.strip(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FALLBACK RESPONSE — When retrieval finds no passing chunks
 # ─────────────────────────────────────────────────────────────────────────────
 FALLBACK_RESPONSE = (
     "I could not find relevant information in the uploaded documents.\n\n"
@@ -35,11 +73,14 @@ FALLBACK_RESPONSE = (
     "  • Checking if the relevant documents have been ingested"
 )
 
+# Programmatic weak-evidence / grounding failure (exact wording per requirements)
+INSUFFICIENT_DOCUMENT_EVIDENCE = "The retrieved documents do not contain enough information."
+
 # ─────────────────────────────────────────────────────────────────────────────
-# CONTEXT FORMAT — Template for each retrieved chunk injected into the prompt
+# CONTEXT FORMAT — Each chunk with citation + chunk id for traceability
 # ─────────────────────────────────────────────────────────────────────────────
 CONTEXT_CHUNK_TEMPLATE = """\
-[Source: {source_file}{page_info}] [Relevance: {score:.2f}]
+[Chunk ID: {chunk_id}] [Source: {source_file}{page_info}] [Relevance: {score:.2f}]
 ---
 {content}
 """
