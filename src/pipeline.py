@@ -21,6 +21,7 @@ from src.embeddings.embedder import create_embedder
 from src.vectordb.store import ChromaVectorStore
 from src.retrieval.retriever import SemanticRetriever
 from src.retrieval.sentence_evidence import (
+    compress_scored_sentences,
     dedupe_sentences,
     format_sentence_evidence_blocks,
     pack_evidence_sentences,
@@ -45,7 +46,7 @@ from src.config import get_settings
 logger = logging.getLogger(__name__)
 
 # Soft cap per chunk body when building LLM context (characters).
-_CONTEXT_CHUNK_BODY_MAX_CHARS = 1200
+_CONTEXT_CHUNK_BODY_MAX_CHARS = 380
 
 
 class RAGPipeline:
@@ -246,11 +247,10 @@ class RAGPipeline:
             }
 
         prompt_tokens = self._estimate_prompt_tokens(system_prompt, user_message, history)
-        print(f"Estimated prompt tokens: {prompt_tokens}")
 
         # Step 4b: Compute dynamic max_tokens to prevent 402 errors
         safe_max_tokens = self._compute_safe_max_tokens(prompt_tokens)
-        print(f"Config max_tokens: {self._settings.llm_max_output_tokens} -> Safe max_tokens: {safe_max_tokens}")
+        self._log_token_budget(prompt_tokens, safe_max_tokens, "")
         logger.info(
             "RAG prompt budget: estimated_prompt_tokens=%d config_max_output_tokens=%d safe_max_output_tokens=%d context_chunks=%d",
             prompt_tokens,
@@ -408,7 +408,7 @@ class RAGPipeline:
 
         # Compute dynamic max_tokens to prevent 402 errors
         safe_max_tokens = self._compute_safe_max_tokens(prompt_tokens)
-        print(f"[stream] Estimated prompt tokens: {prompt_tokens} -> Safe max_tokens: {safe_max_tokens}")
+        self._log_token_budget(prompt_tokens, safe_max_tokens, "[stream] ")
         logger.info(
             "RAG stream prompt budget: estimated_prompt_tokens=%d config_max_output_tokens=%d safe_max_output_tokens=%d context_chunks=%d",
             prompt_tokens,
@@ -534,9 +534,12 @@ class RAGPipeline:
         if not chunks:
             return "", "", {}
 
-        max_chars = max(400, self._settings.max_context_tokens * 4 - 500)
+        # Tight character budget for evidence text (~75% of estimated token budget as chars/bytes heuristic).
+        max_chars = max(120, int(self._settings.max_context_tokens * 3) - 180)
         scored, dbg = score_sentences_for_query(question, chunks, self._retriever._reranker)
         scored = dedupe_sentences(scored)
+        scored = compress_scored_sentences(scored)
+        dbg["compressed_sentence_count"] = len(scored)
         packed, corpus = pack_evidence_sentences(scored, max_chars)
 
         if not packed:
@@ -579,7 +582,7 @@ class RAGPipeline:
         ordered = sorted(chunks, key=lambda c: (c.page_number or 0, c.chunk_index))
         formatted: list[str] = []
         total_chars = 0
-        max_context_chars = self._settings.max_context_tokens * 4
+        max_context_chars = int(self._settings.max_context_tokens * 3)
 
         for i, chunk in enumerate(ordered, start=1):
             body = chunk.content
@@ -595,35 +598,32 @@ class RAGPipeline:
         return "\n\n".join(formatted)
 
     def _compute_safe_max_tokens(self, estimated_prompt_tokens: int) -> int:
-        """
-        Compute safe max_tokens to prevent 402 credit errors.
-        
-        Assumes typical OpenRouter credit cost:
-        - Input: ~1 credit per 1000 tokens
-        - Output: ~3 credits per 1000 tokens
-        
-        Safety buffer: reserve 20% margin to account for token estimation variance.
-        """
-        # Hard minimum and maximum
-        min_output_tokens = 64
-        max_output_tokens = self._settings.llm_max_output_tokens
-        
-        # Estimate total request cost if we use max_output_tokens
-        # This is a rough heuristic; actual costs vary by model
-        estimated_input_cost = max(estimated_prompt_tokens // 1000, 1)
-        estimated_output_cost_per_token = 0.003  # 3 credits per 1000 output tokens
-        
-        # If prompt is very large, reduce output tokens aggressively
-        if estimated_prompt_tokens > 2000:
-            safe_output = min(max_output_tokens, 80)
-        elif estimated_prompt_tokens > 1500:
-            safe_output = min(max_output_tokens, 100)
-        elif estimated_prompt_tokens > 1000:
-            safe_output = min(max_output_tokens, 120)
-        else:
-            safe_output = max_output_tokens
-        
-        return max(min_output_tokens, safe_output)
+        """Cap completion tokens at config (default 48); shave slightly if the prompt is enormous."""
+        cap = self._settings.llm_max_output_tokens
+        if estimated_prompt_tokens > 3500:
+            return max(32, min(cap, 40))
+        if estimated_prompt_tokens > 2400:
+            return max(32, min(cap, 44))
+        return max(32, cap)
+
+    @staticmethod
+    def _log_token_budget(
+        estimated_input_tokens: int,
+        requested_output_tokens: int,
+        prefix: str = "",
+    ) -> None:
+        total = estimated_input_tokens + requested_output_tokens
+        print(
+            f"{prefix}[tokens] estimated_input_tokens={estimated_input_tokens} "
+            f"requested_output_tokens={requested_output_tokens} "
+            f"estimated_total_tokens={total}"
+        )
+        logger.info(
+            "Token estimate (OpenRouter): input=%d output_req=%d total_est=%d",
+            estimated_input_tokens,
+            requested_output_tokens,
+            total,
+        )
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:
