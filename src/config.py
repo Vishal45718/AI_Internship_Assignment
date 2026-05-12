@@ -130,8 +130,8 @@ class Settings(BaseSettings):
     )
 
     # ── Chunking ─────────────────────────────────────────────────────────────
-    chunk_size: int = Field(default=500, ge=100, le=4000)
-    chunk_overlap: int = Field(default=50, ge=0, le=200)
+    chunk_size: int = Field(default=180, ge=100, le=4000, description="Fine-grained chunks for definitional sentences.")
+    chunk_overlap: int = Field(default=80, ge=0, le=200)
 
     # ── Logging ──────────────────────────────────────────────────────────────
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO")
