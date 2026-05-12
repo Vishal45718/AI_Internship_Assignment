@@ -8,7 +8,7 @@ Evidence blocks and instructions are composed into the user message.
 # SYSTEM PROMPT — Minimal; evidence and rules live in the user message
 # ─────────────────────────────────────────────────────────────────────────────
 RAG_SYSTEM_PROMPT = """You answer strictly from the Retrieved Evidence in the user message (paper/document text).
-Follow the Instructions exactly. Do not substitute generic machine-learning textbook explanations for what the evidence says.
+Be brief. Follow the Instructions exactly. Do not substitute generic ML textbook explanations for what the evidence says.
 If the evidence does not state it, do not infer it."""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -21,10 +21,11 @@ RAG_USER_MESSAGE_TEMPLATE = """Retrieved Evidence:
 Instructions:
 
 * Answer ONLY using retrieved evidence (quoted sentences above).
-* Extract definitions, mechanisms, and thresholds directly from that text—prefer short quotes or tight paraphrases tied to those sentences.
+* Reply briefly: at most 2–4 short sentences total; no long paragraphs or lecture-style explanations.
+* Extract definitions, mechanisms, and thresholds directly from that text—prefer short quotes or tight paraphrases.
 * Do NOT use outside knowledge or generic ML explanations not stated in the evidence.
 * Do NOT expand acronyms unless explicitly present in evidence.
-* Avoid summarizing with vague phrases (e.g. "typically", "often used in deep learning") unless the evidence uses similar wording.
+* Avoid vague filler ("typically", "often used in deep learning") unless the evidence uses similar wording.
 * If evidence is insufficient, say:
   "The retrieved documents do not contain enough information."
 
@@ -42,9 +43,9 @@ def build_rag_user_message(evidence_blocks: str, question: str) -> str:
 
 
 def format_evidence_chunk_block(chunk_index: int, page_display: str, quoted_body: str) -> str:
-    """One evidence block: [Chunk N | Page X] plus quoted text."""
+    """Compact chunk evidence block (fewer tokens than verbose headers)."""
     safe = quoted_body.replace('"', "'")
-    return f'[Chunk {chunk_index} | Page {page_display}]\n"{safe}"'
+    return f'[C{chunk_index}|P{page_display}]\n"{safe}"'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
