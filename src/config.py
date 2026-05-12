@@ -58,6 +58,14 @@ class Settings(BaseSettings):
     openrouter_model: str = Field(default="google/gemini-2.0-flash-001")
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
 
+    # ── LLM generation (output token cap; keeps OpenRouter costs predictable) ──
+    llm_max_output_tokens: int = Field(
+        default=512,
+        ge=64,
+        le=512,
+        description="Max completion tokens per request (capped at 512; never use 4096).",
+    )
+
     @field_validator("openrouter_model", mode="before")
     @classmethod
     def validate_openrouter_model(cls, value: str) -> str:
@@ -99,8 +107,8 @@ class Settings(BaseSettings):
     # ── Retrieval ────────────────────────────────────────────────────────────
     retrieval_top_k: int = Field(default=20, ge=1, le=100)
     rerank_top_k: int = Field(default=5, ge=1, le=30)
-    final_context_chunks: int = Field(default=8, ge=1, le=30)
-    max_context_tokens: int = Field(default=3500, ge=256, le=12000)
+    final_context_chunks: int = Field(default=5, ge=1, le=30)
+    max_context_tokens: int = Field(default=1500, ge=256, le=12000)
     retrieval_score_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     rerank_score_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
     similarity_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
