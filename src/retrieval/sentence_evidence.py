@@ -192,10 +192,12 @@ def score_sentences_for_query(
 
 
 def dedupe_sentences(scored: list[ScoredSentence]) -> list[ScoredSentence]:
+    """Drop near-duplicate sentences (overlap from chunking)."""
     seen: set[str] = set()
     out: list[ScoredSentence] = []
     for s in scored:
-        key = re.sub(r"\s+", " ", s.text.lower())[:240]
+        normalized = re.sub(r"\s+", " ", s.text.lower().strip())
+        key = normalized[:200]
         if key in seen:
             continue
         seen.add(key)
@@ -203,16 +205,41 @@ def dedupe_sentences(scored: list[ScoredSentence]) -> list[ScoredSentence]:
     return out
 
 
+def compress_scored_sentences(
+    scored: list[ScoredSentence],
+    *,
+    min_final_score: float = 0.17,
+    min_rerank_score: float = 0.085,
+    max_candidates: int = 36,
+) -> list[ScoredSentence]:
+    """
+    Remove low-scoring sentences before packing; keep explanatory-heavy candidates.
+    Always retain at least the top sentence so we never return empty spuriously.
+    """
+    if not scored:
+        return []
+    head = scored[:max_candidates]
+    kept = [
+        s
+        for s in head
+        if s.final_score >= min_final_score or s.rerank_score >= min_rerank_score
+    ]
+    if len(kept) >= 2:
+        return kept
+    # Preserve best-ranked sentences if filtering was too aggressive
+    return head[: max(3, min(6, len(head)))]
+
+
 def pack_evidence_sentences(
     scored: list[ScoredSentence],
     max_chars: int,
-    max_sentences: int = 24,
-    max_sentence_chars: int = 600,
+    max_sentences: int = 8,
+    max_sentence_chars: int = 260,
 ) -> tuple[list[ScoredSentence], str]:
-    """Greedy pack top sentences until character budget."""
+    """Greedy pack highest-value explanatory sentences until character budget."""
     packed: list[ScoredSentence] = []
     total = 0
-    block_overhead = 80
+    block_overhead = 42
     for s in scored:
         if len(packed) >= max_sentences:
             break
@@ -246,10 +273,9 @@ def pack_evidence_sentences(
 
 
 def format_sentence_evidence_blocks(packed: list[ScoredSentence]) -> str:
+    """Compact labels to reduce prompt tokens."""
     blocks: list[str] = []
     for i, s in enumerate(packed, start=1):
         safe = s.text.replace('"', "'")
-        blocks.append(
-            f'[Evidence {i} | chunk {s.chunk_id} | Page {s.page_display}]\n"{safe}"'
-        )
+        blocks.append(f'[E{i}|P{s.page_display}]\n"{safe}"')
     return "\n\n".join(blocks)
