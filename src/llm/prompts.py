@@ -11,6 +11,8 @@ RAG_SYSTEM_PROMPT = """You answer strictly from the Retrieved Evidence in the us
 Be brief. Follow the Instructions exactly. Do not substitute generic ML textbook explanations for what the evidence says.
 If the evidence does not state it, do not infer it."""
 
+RAG_SYSTEM_PROMPT_COMPACT = "Answer only from retrieved evidence. Be brief. If evidence is insufficient, say so."
+
 # ─────────────────────────────────────────────────────────────────────────────
 # USER MESSAGE — Retrieved Evidence + Instructions + Question
 # ─────────────────────────────────────────────────────────────────────────────
