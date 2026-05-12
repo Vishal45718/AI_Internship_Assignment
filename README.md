@@ -159,16 +159,28 @@ Open `http://localhost:3000` (or the port shown by Next.js).
 
 ---
 
-## Example queries
+## Example Queries
 
-After uploading one or more research PDFs, try **document** mode:
+After uploading one or more documents, try queries such as:
 
-- “How does SeaKR decide when retrieval is necessary?”
-- “What limitations does the paper mention about retrieval strategies?”
-- “How does DRAGIN reformulate retrieval queries?”
-- “What does ReAL optimize, according to the paper?”
+### Research PDF
+- “What is Test-time Corpus Feedback in RAG systems?”
+- “How does the paper categorize feedback mechanisms in Retrieval-Augmented Generation?”
+- “What challenges in Retrieval-Augmented Generation are discussed in the paper?”
 
-Answers should reflect **retrieved passages**; if the corpus does not support a detail, the system should avoid inventing it and respond cautiously.
+### Markdown Documents
+- “How are blockquotes represented in Markdown?”
+- “What are the two styles of headers supported in Markdown?”
+
+### CSV Files
+- “What columns are present in the dataset?”
+- “How many customer records are available?”
+
+### TXT Files
+- “Summarize the uploaded text file.”
+- “What repeating patterns are present in the text?”
+
+The system is designed to generate grounded responses strictly from retrieved evidence. If sufficient supporting context is unavailable, the model responds cautiously instead of generating unsupported claims.
 
 ---
 
