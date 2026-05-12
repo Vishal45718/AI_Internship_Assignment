@@ -214,7 +214,13 @@ class RAGPipeline:
         user_message = build_rag_user_message(evidence_blocks, question)
         system_prompt = RAG_SYSTEM_PROMPT
 
-        print(f"Sentence evidence: mode={sentence_meta.get('mode')} packed={sentence_meta.get('packed_count')} focus={sentence_meta.get('focus')}")
+        print(
+            "Sentence evidence: "
+            f"mode={sentence_meta.get('mode')} "
+            f"packed={sentence_meta.get('packed_count')} "
+            f"dropped={sentence_meta.get('dropped_evidence_count')} "
+            f"focus={sentence_meta.get('focus')}"
+        )
 
         allow_llm, block_reasons, pre_debug = assess_pre_generation_support(
             question,
@@ -251,6 +257,9 @@ class RAGPipeline:
         # Step 4b: Compute dynamic max_tokens to prevent 402 errors
         safe_max_tokens = self._compute_safe_max_tokens(prompt_tokens)
         self._log_token_budget(prompt_tokens, safe_max_tokens, "")
+        print(f"Final prompt token estimate: {prompt_tokens}")
+        print(f"Dropped evidence count: {sentence_meta.get('dropped_evidence_count')}")
+        print(f"Final max_tokens: {safe_max_tokens}")
         logger.info(
             "RAG prompt budget: estimated_prompt_tokens=%d config_max_output_tokens=%d safe_max_output_tokens=%d context_chunks=%d",
             prompt_tokens,
@@ -376,7 +385,9 @@ class RAGPipeline:
 
         print(
             f"[stream] Sentence evidence: mode={sentence_meta.get('mode')} "
-            f"packed={sentence_meta.get('packed_count')} focus={sentence_meta.get('focus')}"
+            f"packed={sentence_meta.get('packed_count')} "
+            f"dropped={sentence_meta.get('dropped_evidence_count')} "
+            f"focus={sentence_meta.get('focus')}"
         )
 
         allow_llm, block_reasons, pre_debug = assess_pre_generation_support(
@@ -409,6 +420,9 @@ class RAGPipeline:
         # Compute dynamic max_tokens to prevent 402 errors
         safe_max_tokens = self._compute_safe_max_tokens(prompt_tokens)
         self._log_token_budget(prompt_tokens, safe_max_tokens, "[stream] ")
+        print(f"[stream] Final prompt token estimate: {prompt_tokens}")
+        print(f"[stream] Dropped evidence count: {sentence_meta.get('dropped_evidence_count')}")
+        print(f"[stream] Final max_tokens: {safe_max_tokens}")
         logger.info(
             "RAG stream prompt budget: estimated_prompt_tokens=%d config_max_output_tokens=%d safe_max_output_tokens=%d context_chunks=%d",
             prompt_tokens,
@@ -540,7 +554,7 @@ class RAGPipeline:
         scored = dedupe_sentences(scored)
         scored = compress_scored_sentences(scored)
         dbg["compressed_sentence_count"] = len(scored)
-        packed, corpus = pack_evidence_sentences(scored, max_chars)
+        packed, corpus = pack_evidence_sentences(scored, max_chars, max_sentences=2, max_sentence_chars=180)
 
         if not packed:
             fb = self._format_chunk_evidence_fallback(chunks)
@@ -549,6 +563,7 @@ class RAGPipeline:
                 **dbg,
                 "mode": "chunk_fallback",
                 "packed_count": 0,
+                "dropped_sentence_count": len(scored),
                 "selected": [],
             }
 
@@ -557,6 +572,7 @@ class RAGPipeline:
             **dbg,
             "mode": "sentence",
             "packed_count": len(packed),
+            "dropped_sentence_count": max(0, len(scored) - len(packed)),
             "selected": [
                 {
                     "preview": (p.text[:160] + "…") if len(p.text) > 160 else p.text,
@@ -598,13 +614,8 @@ class RAGPipeline:
         return "\n\n".join(formatted)
 
     def _compute_safe_max_tokens(self, estimated_prompt_tokens: int) -> int:
-        """Cap completion tokens at config (default 48); shave slightly if the prompt is enormous."""
-        cap = self._settings.llm_max_output_tokens
-        if estimated_prompt_tokens > 3500:
-            return max(32, min(cap, 40))
-        if estimated_prompt_tokens > 2400:
-            return max(32, min(cap, 44))
-        return max(32, cap)
+        """Hard cap completion tokens for free-tier compatibility."""
+        return max(32, min(32, self._settings.llm_max_output_tokens))
 
     @staticmethod
     def _log_token_budget(
@@ -659,18 +670,26 @@ class RAGPipeline:
             reverse=True,
         )
         working = list(ranked)
-        budget = self._settings.max_context_tokens
+        budget = min(self._settings.max_context_tokens, 300)
+        dropped_count = 0
 
         while working:
             ordered = sorted(working, key=lambda c: (c.page_number or 0, c.chunk_index))
             evidence_blocks, corpus_plain, meta = self._build_evidence_from_chunks(question, ordered)
             user_message = build_rag_user_message(evidence_blocks, question)
-            if self._estimate_prompt_tokens(RAG_SYSTEM_PROMPT, user_message, history) <= budget:
+            prompt_est = self._estimate_prompt_tokens(RAG_SYSTEM_PROMPT, user_message, history)
+            if prompt_est <= budget:
+                meta["final_prompt_token_estimate"] = prompt_est
+                meta["dropped_evidence_count"] = dropped_count + int(meta.get("dropped_sentence_count", 0))
                 return ordered, evidence_blocks, corpus_plain, meta
+            dropped_count += 1
             working.pop()
 
         ordered = sorted(ranked[:1], key=lambda c: (c.page_number or 0, c.chunk_index))
         eb, cp, m = self._build_evidence_from_chunks(question, ordered)
+        fallback_prompt_est = self._estimate_prompt_tokens(RAG_SYSTEM_PROMPT, build_rag_user_message(eb, question), history)
+        m["final_prompt_token_estimate"] = fallback_prompt_est
+        m["dropped_evidence_count"] = dropped_count + int(m.get("dropped_sentence_count", 0))
         return ordered, eb, cp, m
 
     def _dedupe_sources(self, chunks: list) -> list[dict[str, Any]]:
