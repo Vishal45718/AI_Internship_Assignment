@@ -23,15 +23,16 @@ from src.retrieval.retriever import SemanticRetriever
 from src.llm.client import create_llm_client
 from src.llm.prompts import (
     RAG_SYSTEM_PROMPT,
-    CONTEXT_CHUNK_TEMPLATE,
     FALLBACK_RESPONSE,
     INSUFFICIENT_DOCUMENT_EVIDENCE,
     build_rag_user_message,
+    format_evidence_chunk_block,
 )
 from src.llm.grounding import (
     assess_pre_generation_support,
     validate_post_generation,
     STRICT_REGENERATION_SYSTEM_SUFFIX,
+    build_retrieval_corpus,
 )
 from src.config import get_settings
 
@@ -201,8 +202,9 @@ class RAGPipeline:
 
         # Step 4: Enforce prompt token budget (trim lowest-ranked chunks first)
         chunks_for_llm = self._trim_chunks_for_prompt_budget(result.chunks, question, history)
-        context_str = self._format_context(chunks_for_llm)
-        user_message = build_rag_user_message(question, context_str)
+        evidence_blocks = self._format_context(chunks_for_llm)
+        corpus_plain = build_retrieval_corpus(chunks_for_llm)
+        user_message = build_rag_user_message(evidence_blocks, question)
         system_prompt = RAG_SYSTEM_PROMPT
 
         allow_llm, block_reasons, pre_debug = assess_pre_generation_support(
@@ -219,6 +221,7 @@ class RAGPipeline:
                 grounding_confidence=0.0,
                 post_validation=None,
                 triggers=grounding_triggers,
+                regeneration_attempts=0,
             )
             return {
                 "answer": INSUFFICIENT_DOCUMENT_EVIDENCE,
@@ -263,8 +266,9 @@ class RAGPipeline:
                 "status": "error",
             }
 
-        post_val = validate_post_generation(answer, question, context_str, result.top_score)
+        post_val = validate_post_generation(answer, question, corpus_plain, result.top_score)
         regenerated = False
+        regeneration_attempts = 1
         if post_val.get("regenerate"):
             try:
                 answer = self._llm.generate(
@@ -274,7 +278,8 @@ class RAGPipeline:
                     max_tokens=safe_max_tokens,
                 )
                 regenerated = True
-                post_val = validate_post_generation(answer, question, context_str, result.top_score)
+                regeneration_attempts = 2
+                post_val = validate_post_generation(answer, question, corpus_plain, result.top_score)
             except Exception as exc:
                 logger.error("LLM regeneration failed: %s", exc)
                 answer = INSUFFICIENT_DOCUMENT_EVIDENCE
@@ -299,6 +304,7 @@ class RAGPipeline:
             grounding_confidence=float(post_val.get("grounding_confidence", 0.0)),
             post_validation=post_val,
             triggers=grounding_triggers,
+            regeneration_attempts=regeneration_attempts,
         )
 
         return {
@@ -310,6 +316,7 @@ class RAGPipeline:
                 "pre_generation": pre_debug,
                 "post_generation": post_val,
                 "regenerated": regenerated,
+                "regeneration_attempts": regeneration_attempts,
                 "triggers": grounding_triggers,
             },
         }
@@ -349,8 +356,9 @@ class RAGPipeline:
         print(f"[stream] Final chunk count: {result.final_chunk_count}")
 
         chunks_for_llm = self._trim_chunks_for_prompt_budget(result.chunks, question, history)
-        context_str = self._format_context(chunks_for_llm)
-        user_message = build_rag_user_message(question, context_str)
+        evidence_blocks = self._format_context(chunks_for_llm)
+        corpus_plain = build_retrieval_corpus(chunks_for_llm)
+        user_message = build_rag_user_message(evidence_blocks, question)
         system_prompt = RAG_SYSTEM_PROMPT
 
         allow_llm, block_reasons, pre_debug = assess_pre_generation_support(
@@ -367,6 +375,7 @@ class RAGPipeline:
                 grounding_confidence=0.0,
                 post_validation=None,
                 triggers=grounding_triggers,
+                regeneration_attempts=0,
                 prefix="[stream] ",
             )
             yield "sources", self._dedupe_sources(chunks_for_llm)
@@ -401,7 +410,8 @@ class RAGPipeline:
             yield "error", f"Error generating answer: {exc}"
             return
 
-        post_val = validate_post_generation(answer, question, context_str, result.top_score)
+        post_val = validate_post_generation(answer, question, corpus_plain, result.top_score)
+        regeneration_attempts = 1
         if post_val.get("regenerate"):
             try:
                 answer = self._llm.generate(
@@ -410,7 +420,8 @@ class RAGPipeline:
                     history=history,
                     max_tokens=safe_max_tokens,
                 )
-                post_val = validate_post_generation(answer, question, context_str, result.top_score)
+                regeneration_attempts = 2
+                post_val = validate_post_generation(answer, question, corpus_plain, result.top_score)
             except Exception as exc:
                 logger.error("LLM regeneration failed (stream path): %s", exc)
                 answer = INSUFFICIENT_DOCUMENT_EVIDENCE
@@ -434,6 +445,7 @@ class RAGPipeline:
             grounding_confidence=float(post_val.get("grounding_confidence", 0.0)),
             post_validation=post_val,
             triggers=grounding_triggers,
+            regeneration_attempts=regeneration_attempts,
             prefix="[stream] ",
         )
 
@@ -448,44 +460,56 @@ class RAGPipeline:
         grounding_confidence: float,
         post_validation: dict[str, Any] | None,
         triggers: list[dict[str, Any]],
+        regeneration_attempts: int,
         prefix: str = "",
     ) -> None:
-        print(f"{prefix}[grounding] retrieved_chunks_used: {[c.chunk_id for c in chunks_for_llm]}")
+        evidence_summary = [
+            {
+                "chunk_id": c.chunk_id,
+                "page": c.page_number,
+                "preview": (c.content[:120] + "…") if len(c.content) > 120 else c.content,
+            }
+            for c in sorted(chunks_for_llm, key=lambda x: (x.page_number or 0, x.chunk_index))
+        ]
+        print(f"{prefix}[grounding] retrieved_evidence_used: {evidence_summary}")
+        print(f"{prefix}[grounding] regeneration_attempts: {regeneration_attempts}")
         print(f"{prefix}[grounding] grounding_confidence: {grounding_confidence:.3f}")
         if post_validation is not None:
             print(
+                f"{prefix}[grounding] unsupported_generated_terms: {post_validation.get('unsupported_terms')}"
+            )
+            print(
+                f"{prefix}[grounding] unsupported_noun_phrases: {post_validation.get('unsupported_noun_phrases')}"
+            )
+            print(
+                f"{prefix}[grounding] hallucination_detection_triggers: "
+                f"{post_validation.get('hallucination_triggers')}"
+            )
+            print(
                 f"{prefix}[grounding] unsupported_claim_detection: "
                 f"ratio={post_validation.get('unsupported_ratio')} "
-                f"terms={post_validation.get('unsupported_terms')} "
                 f"protected_violations={post_validation.get('protected_violations')}"
             )
         else:
-            print(f"{prefix}[grounding] unsupported_claim_detection: (not run — blocked before generation)")
+            print(f"{prefix}[grounding] post_generation_checks: (skipped — blocked before generation)")
         print(f"{prefix}[grounding] hallucination_fallback_triggers: {triggers}")
 
     def _format_context(self, chunks: list) -> str:
-        """Format retrieved chunks into the labeled context block for the LLM."""
+        """Format retrieved chunks as explicit evidence blocks for the LLM prompt."""
         if not chunks:
-            return "(No relevant context was retrieved.)"
+            return ""
 
         ordered = sorted(chunks, key=lambda c: (c.page_number or 0, c.chunk_index))
         formatted: list[str] = []
         total_chars = 0
         max_context_chars = self._settings.max_context_tokens * 4
 
-        for chunk in ordered:
-            score = chunk.rerank_score if chunk.rerank_score > 0 else chunk.similarity_score
-            page_info = f", Page {chunk.page_number}" if chunk.page_number else ""
+        for i, chunk in enumerate(ordered, start=1):
             body = chunk.content
             if len(body) > _CONTEXT_CHUNK_BODY_MAX_CHARS:
                 body = body[:_CONTEXT_CHUNK_BODY_MAX_CHARS] + "…"
-            chunk_str = CONTEXT_CHUNK_TEMPLATE.format(
-                chunk_id=chunk.chunk_id,
-                source_file=chunk.source_file,
-                page_info=page_info,
-                score=score,
-                content=body,
-            )
+            page_display = str(chunk.page_number) if chunk.page_number is not None else "?"
+            chunk_str = format_evidence_chunk_block(i, page_display, body)
             if total_chars + len(chunk_str) > max_context_chars:
                 break
             formatted.append(chunk_str)
@@ -562,8 +586,8 @@ class RAGPipeline:
 
         while working:
             ordered = sorted(working, key=lambda c: (c.page_number or 0, c.chunk_index))
-            context_str = self._format_context(ordered)
-            user_message = build_rag_user_message(question, context_str)
+            evidence_blocks = self._format_context(ordered)
+            user_message = build_rag_user_message(evidence_blocks, question)
             if self._estimate_prompt_tokens(RAG_SYSTEM_PROMPT, user_message, history) <= budget:
                 return ordered
             working.pop()
