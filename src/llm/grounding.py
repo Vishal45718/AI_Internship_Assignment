@@ -394,8 +394,8 @@ def validate_post_generation(
 
 
 STRICT_REGENERATION_SYSTEM_SUFFIX = (
-    "\n\nREGENERATION: Answer only from explicit evidence in the Retrieved Evidence section. "
-    "Do not use outside knowledge or generic ML explanations. Quote or tightly paraphrase only "
-    "sentences shown in evidence. If overlap with evidence would be weak, reply exactly with: "
+    "\n\nREGENERATION: Answer only from explicit evidence. Max 2–4 short sentences. "
+    "No generic ML explanations. Quote or tightly paraphrase evidence only. "
+    "If you cannot, reply exactly: "
     '"The retrieved documents do not contain enough information."'
 )
