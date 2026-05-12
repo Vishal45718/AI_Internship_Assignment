@@ -5,7 +5,7 @@ Uses LangChain's RecursiveCharacterTextSplitter for paragraph-aware
 chunking. Each chunk gets a deterministic ID and full provenance
 metadata so sources can always be traced back to the original document.
 
-Default settings: chunk_size=500, chunk_overlap=50
+Default settings come from config (fine-grained chunk_size / overlap).
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ class DocumentChunker:
 
         raw_chunks: list[str] = self._splitter.split_text(document.content)
         # Filter out very short chunks (< 50 chars) that aren't meaningful
-        raw_chunks = [c for c in raw_chunks if len(c.strip()) > 50]
+        raw_chunks = [c for c in raw_chunks if len(c.strip()) > 35]
 
         if not raw_chunks:
             logger.warning("No chunks for '%s' — content may be too short.", document.metadata.source_file)
